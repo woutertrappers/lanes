@@ -1,14 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <!-- lanes: three parallel sessions, each at its own point in its own lane -->
-  <rect width="1024" height="1024" rx="224" fill="#14213d"/>
-  <g>
-    <rect x="212" y="172" width="152" height="680" rx="76" fill="#1f9e89"/>
-    <rect x="436" y="172" width="152" height="680" rx="76" fill="#f2a541"/>
-    <rect x="660" y="172" width="152" height="680" rx="76" fill="#e5625e"/>
+  <!-- lanes: three parallel sessions, each at its own point in its own lane.
+       Xudo palette (xudo.be main.css): deep #0A4A3A, deep-light #DCF0EA, accent #C44A28. -->
+  <rect width="1024" height="1024" rx="224" fill="#0A4A3A"/>
+  <g fill="#DCF0EA">
+    <rect x="212" y="172" width="152" height="680" rx="76"/>
+    <rect x="436" y="172" width="152" height="680" rx="76"/>
+    <rect x="660" y="172" width="152" height="680" rx="76"/>
   </g>
-  <g fill="#ffffff">
-    <circle cx="288" cy="672" r="52"/>
-    <circle cx="512" cy="352" r="52"/>
-    <circle cx="736" cy="532" r="52"/>
-  </g>
+  <circle cx="288" cy="672" r="52" fill="#0A4A3A"/>
+  <circle cx="512" cy="352" r="52" fill="#C44A28"/>
+  <circle cx="736" cy="532" r="52" fill="#0A4A3A"/>
 </svg>
