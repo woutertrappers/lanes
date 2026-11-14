@@ -51,6 +51,13 @@ lanes rm feat-invoice-export      # merged? stack, volumes, images, index and fo
 lanes prune                       # or clean up every merged lane at once (dry run; --yes to do it)
 ```
 
+After merging, in the main checkout, one command does the integrator's chores:
+
+```bash
+git config --global alias.post-merge '!lanes sync'   # once
+git post-merge                    # pull main, prune merged lanes and branches, reindex
+```
+
 ## Commands
 
 | Command | What it does |
@@ -63,6 +70,7 @@ lanes prune                       # or clean up every merged lane at once (dry r
 | `lanes index` | rebuild this checkout's GitNexus index |
 | `lanes up` / `down` / `url` | stack control inside a lane |
 | `lanes rm <name> [--force]` | removes everything; refuses uncommitted or unpushed work |
+| `lanes sync` | in the main checkout after merges: switch to `main` if the current branch is merged, `pull --ff-only`, `prune --yes`, delete merged local branches (squash merges confirmed with the forge), refresh the index |
 | `lanes prune [--yes]` | after merges: removes every lane whose work is merged, squash merges included (asks the forge); dry run without `--yes` |
 | `lanes doctor` | readiness check: compose file, ports, env file, CLIs, hook |
 | `lanes adopt [dir] [--up]` | give a worktree made by any tool its lane runtime |

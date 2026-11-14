@@ -82,6 +82,7 @@ call it by its path or offer to symlink it into `~/.local/bin`.
 | `lanes index` | refresh the GitNexus index of this checkout |
 | `lanes up` / `down` / `url` | stack control inside a lane |
 | `lanes rm <name>` | stack, volumes, images, index and worktree gone; refuses unpushed work |
+| `lanes sync` (`git post-merge`) | main checkout after merges: pull, prune lanes and merged branches, reindex; refuses on an unmerged or dirty branch |
 | `lanes prune [--yes]` | every merged lane gone (merge, fast-forward or squash via the forge); keeps dirty, fresh and changed-after-merge lanes; also stops orphaned stacks |
 | `lanes doctor` | readiness check for the current repo |
 | `lanes adopt [dir] [--up]` | lane runtime for a worktree made by another tool |

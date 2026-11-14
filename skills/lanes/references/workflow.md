@@ -42,7 +42,8 @@ warnings before you write code.
 ## Done
 
 1. Mark the draft ready; wait for a green pipeline.
-2. The integrator merges, pulls `main` in the main checkout, refreshes its index.
+2. The integrator merges, then runs `lanes sync` (or the alias `git post-merge`) in the main
+   checkout: pull `main`, remove merged lanes and branches, refresh the index.
 3. `lanes rm <name>` removes the stack, volumes, images, index and folder. It refuses while
    work is uncommitted or unpushed. After a round of merges, `lanes prune` lists every lane
    whose work is merged (squash merges too) and `lanes prune --yes` removes them.

@@ -19,6 +19,7 @@
 #   lanes url                         # in a lane: the app URL
 #   lanes rm <name> [--force]         # stack, volumes, images, index and worktree gone
 #   lanes prune [--yes]               # remove every lane whose work is merged (dry run without --yes)
+#   lanes sync                        # main checkout, after merges: pull, prune lanes + merged branches, reindex
 #   lanes doctor                      # check this repo is ready for lanes
 #   lanes adopt [dir] [--up]          # give an existing worktree (any tool) its lane runtime
 #   lanes release [dir]               # stop a lane's runtime, keep the worktree
@@ -440,7 +441,7 @@ cmd_rm() {
   [ "$dir" != "$MAIN" ] || die "refusing to remove the main checkout"
   branch="$(git -C "$dir" branch --show-current)"
   if [ "$force" = 0 ]; then
-    [ -z "$(git -C "$dir" status --porcelain)" ] || die "$dir has uncommitted changes (--force to drop them)"
+    [ -z "$(git -C "$dir" status --porcelain -- . ":(exclude)$LANES_ENV_FILE")" ] || die "$dir has uncommitted changes (--force to drop them)"
     if git -C "$dir" rev-parse -q --verify '@{u}' >/dev/null; then unpushed="$(git -C "$dir" log --oneline '@{u}..' | wc -l)"
     else unpushed="$(git -C "$dir" log --oneline "$LANES_BASE.." | wc -l)"; fi
     [ "$unpushed" = 0 ] || die "$branch has $unpushed commit(s) not on the remote (push, or --force)"
@@ -477,7 +478,7 @@ for o in json.load(sys.stdin): print(o.get('$1') or '')"; fi 2>/dev/null || true
 prune_verdict() {  # prune_verdict <dir> <branch>
   local dir="$1" b="$2" head start h
   [ -n "$b" ] || { echo "keep detached HEAD"; return; }
-  [ -z "$(git -C "$dir" status --porcelain 2>/dev/null)" ] || { echo "keep uncommitted changes"; return; }
+  [ -z "$(git -C "$dir" status --porcelain -- . ":(exclude)$LANES_ENV_FILE" 2>/dev/null)" ] || { echo "keep uncommitted changes"; return; }
   head="$(git -C "$dir" rev-parse HEAD)"
   # Where the branch started: the oldest entry of its reflog ("Created from …").
   # After a fast-forward merge HEAD is an ancestor of the base too, so only this
@@ -528,6 +529,47 @@ cmd_prune() {
   else log "pruned $n"; fi
 }
 
+# After merges, in the main checkout: update the default branch, remove merged
+# lanes and merged local branches, refresh the code index. `git post-merge`
+# is an alias for this (see README).
+cmd_sync() {
+  local top cur b tip h gone_left=""
+  top="$(here)"
+  [ "$top" = "$MAIN" ] || die "sync: run it in the main checkout ($MAIN), not in a lane"
+  quiet_git -C "$MAIN" fetch -q --prune origin || die "sync: git fetch failed (ssh-add?)"
+  cur="$(git -C "$MAIN" branch --show-current)"
+  if [ "$cur" != "$LANES_DEFAULT_BRANCH" ]; then
+    [ -n "$cur" ] || die "sync: detached HEAD in the main checkout"
+    [ -z "$(git -C "$MAIN" status --porcelain --untracked-files=no)" ] \
+      || die "sync: the main checkout is on '$cur' with uncommitted changes — commit or stash them, then: git switch $LANES_DEFAULT_BRANCH"
+    git -C "$MAIN" merge-base --is-ancestor "$cur" "$LANES_BASE" \
+      || die "sync: the main checkout is on '$cur', which is not merged — move that work to a lane (lanes new) first"
+    log "switching the main checkout from '$cur' (merged) to $LANES_DEFAULT_BRANCH"
+    git -C "$MAIN" switch -q "$LANES_DEFAULT_BRANCH"
+  fi
+  log "pulling $LANES_DEFAULT_BRANCH..."
+  git -C "$MAIN" pull -q --ff-only origin "$LANES_DEFAULT_BRANCH"
+  log "now at $(git -C "$MAIN" log --oneline -1)"
+  cmd_prune --yes
+  # Local branches without a lane.
+  local inlane; inlane="$(git -C "$MAIN" worktree list --porcelain | sed -n 's#^branch refs/heads/##p')"
+  for b in $(git -C "$MAIN" for-each-ref --format='%(refname:short)' refs/heads); do
+    [ "$b" = "$LANES_DEFAULT_BRANCH" ] && continue
+    echo "$inlane" | grep -qx "$b" && continue
+    tip="$(git -C "$MAIN" rev-parse "$b")"
+    if git -C "$MAIN" merge-base --is-ancestor "$b" "$LANES_BASE"; then
+      git -C "$MAIN" branch -q -D "$b" && log "deleted branch $b (in $LANES_BASE)"; continue
+    fi
+    for h in $(merged_heads "$b"); do
+      if [ "$h" = "$tip" ]; then git -C "$MAIN" branch -q -D "$b" && log "deleted branch $b (squash-merged)"; continue 2; fi
+    done
+    [ -z "$(git -C "$MAIN" for-each-ref --format='%(upstream:track)' "refs/heads/$b" | grep gone)" ] || gone_left="$gone_left $b"
+  done
+  [ -z "$gone_left" ] || log "remote branch gone but not confirmed merged, kept:$gone_left"
+  index_dir "$MAIN"
+  log "sync done"
+}
+
 cmd_doctor() {
   local ok=1 f top
   top="$(here)"
@@ -572,8 +614,9 @@ case "${1:-}" in
   doctor) shift; cmd_doctor "$@";;
   adopt) shift; cmd_adopt "$@";;
   prune) shift; cmd_prune "$@";;
+  sync) shift; cmd_sync "$@";;
   release) shift; cmd_release "$@";;
   hook) shift; cmd_hook "$@";;
-  ""|-h|--help|help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//';;
+  ""|-h|--help|help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//';;
   *) die "unknown command $1 (lanes help)";;
 esac
