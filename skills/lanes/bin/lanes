@@ -365,13 +365,14 @@ cmd_rm() {
 }
 
 cmd_doctor() {
-  local ok=1 f
+  local ok=1 f top
+  top="$(here)"
   check() { if eval "$2"; then echo "  ok    $1"; else echo "  FIX   $1${3:+ — $3}"; ok=0; fi; }
-  echo "lanes doctor — $MAIN"
+  echo "lanes doctor — $top"
   check "git worktree available" "git worktree list >/dev/null 2>&1"
   check ".lanes.conf present" "[ -f '$_conf' ]" "copy templates/lanes.conf; defaults apply until then"
-  if [ -n "$LANES_COMPOSE_FILE" ] && [ -f "$MAIN/$LANES_COMPOSE_FILE" ]; then
-    f="$MAIN/$LANES_COMPOSE_FILE"
+  if [ -n "$LANES_COMPOSE_FILE" ] && [ -f "$top/$LANES_COMPOSE_FILE" ]; then
+    f="$top/$LANES_COMPOSE_FILE"
     check "docker compose v2" "docker compose version >/dev/null 2>&1"
     check "no container_name in $LANES_COMPOSE_FILE" "! grep -qE '^\s*container_name:' '$f'" \
       "fixed names let only one stack run; remove them (compose names containers <project>-<service>-1)"
@@ -388,7 +389,7 @@ cmd_doctor() {
     gitlab) check "glab CLI (listing drafts)" "command -v glab >/dev/null" "optional: claim works through push options";;
   esac
   gitnexus_bin >/dev/null && echo "  ok    GitNexus found: one index per lane" || echo "  --    GitNexus not found (optional)"
-  check "SessionStart hook in .claude/settings.json" "grep -q 'lanes' '$MAIN/.claude/settings.json' 2>/dev/null" \
+  check "SessionStart hook in .claude/settings.json" "grep -q 'lanes' '$top/.claude/settings.json' 2>/dev/null" \
     "copy templates/settings.json"
   [ "$ok" = 1 ] && echo "Ready." || echo "Fix the items above, then: lanes new feat/try-it"
 }
