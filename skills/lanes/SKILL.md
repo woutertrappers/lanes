@@ -1,0 +1,74 @@
+---
+name: lanes
+description: Run several Claude Code sessions or agents on one repository without collisions — one git worktree, dev stack, database and branch per session, draft PRs as claims, a SessionStart hook that shows who works on what, and an audit of the whole dev process (commit, push, deploy, ssh). Use when the user starts feature work while other sessions may be running, asks to "start a new session/lane/worktree", "work in parallel", "multiple agents on one repo", "who is working on what", "set up lanes", or asks to audit or improve their development process, CI/CD or deploy flow.
+---
+
+# lanes
+
+Parallel AI sessions on one repo collide in four places: the working tree (a branch switch
+in one window moves the ground under the others), the dev stack (fixed container names and
+ports), the database, and shared docs everybody edits. `lanes` gives every session its own
+lane and makes the others visible.
+
+The CLI is `bin/lanes` in this skill. Check it is on PATH (`command -v lanes`); if not,
+call it by its path or offer to symlink it into `~/.local/bin`.
+
+## Decide which mode
+
+- **Work mode** — the repo already uses lanes (`.lanes.conf` exists, or `lanes status` ran
+  at session start). Follow the rules below.
+- **Setup mode** — the user wants lanes in a repo. Follow "Set up a repo".
+- **Audit mode** — the user asks to evaluate or improve their dev process. Follow
+  `references/audit.md`.
+
+## Work mode: rules for you as the agent
+
+1. **Read the `lanes status` output** the hook gave you. If you are in the main checkout and
+   it is not on the default branch, say so before doing anything else.
+2. **Feature work happens in a lane.** If you are in the main checkout and asked to build
+   something, run `lanes new <type>/<slug>` and work there (cd into it, or tell the user to
+   start the session there). Do not `git checkout` another branch in the main checkout.
+3. **After the first commit, claim it:** `lanes claim` (opens a draft PR/MR).
+4. **Before editing a widely used file, run `lanes overlap`** and mention any other branch
+   that touches it.
+5. **Shared docs (task list, plan, agent instructions) are the integrator's.** From a lane,
+   put notes in `docs/tasks.d/<branch>.md` or the PR description instead.
+6. **Talk to containers through compose in the lane** (`docker compose --env-file
+   <env> exec <service> …`), never by a fixed container name.
+7. **Code index:** if GitNexus is installed, run `lanes index` after a rebase or large change
+   and before impact / detect-changes.
+8. **Clean up** with `lanes rm <name>` only when the user says the work is merged or dropped.
+   Never pass `--force` without asking.
+9. **Never deploy or touch servers from a lane.** That is the integrator's job.
+
+## Set up a repo
+
+1. `lanes doctor` — lists what is missing.
+2. Copy `templates/lanes.conf` to the repo root as `.lanes.conf`; fill in the ports, URL,
+   database service and bootstrap command from the project's compose file and README.
+3. Make the dev compose file lane-safe: remove `container_name:` lines, read host ports from
+   env vars (`'${FRONTEND_PORT:-5173}:5173'`), keep in-container ports fixed. If CORS or a
+   callback URL hardcodes a port, make it accept any port or read it from env.
+4. Merge `templates/settings.json` into `.claude/settings.json` (keep existing hooks), and
+   make sure `.claude/settings.json` is not gitignored.
+5. Add `references/workflow.md` to the repo docs (adapted) and point the agent instructions
+   file (CLAUDE.md / AGENTS.md) at it in two lines.
+6. Prove it: `lanes new feat/lanes-smoke`, check the app URL, `lanes rm feat-lanes-smoke --force`.
+7. Commit on a branch; do not push or merge without the user.
+
+## Commands
+
+| Command | Does |
+|---|---|
+| `lanes new <type>/<slug>` | worktree from `origin/main`, own compose project + ports, DB cloned or bootstrapped, code index |
+| `lanes ls` | every lane: branch, port, stack, ahead/behind, dirty files |
+| `lanes overlap` | files this branch shares with other open branches |
+| `lanes claim` | push + draft PR (GitHub via `gh`) or MR (GitLab push options) |
+| `lanes status` | the session-start overview |
+| `lanes index` | refresh the GitNexus index of this checkout |
+| `lanes up` / `down` / `url` | stack control inside a lane |
+| `lanes rm <name>` | stack, volumes, images, index and worktree gone; refuses unpushed work |
+| `lanes doctor` | readiness check for the current repo |
+
+Databases: `--db clone` copies the main checkout's Postgres (roles included) so logins work
+straight away; `--db empty` runs `LANES_DB_BOOTSTRAP`; `--db none` skips it.

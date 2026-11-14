@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v lanes >/dev/null && lanes status 2>/dev/null || true",
+            "timeout": 20,
+            "statusMessage": "lanes: checking parallel sessions"
+          }
+        ]
+      }
+    ]
+  }
+}
