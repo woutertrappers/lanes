@@ -96,13 +96,43 @@ main_compose() {
 
 port_taken() { ss -ltnH "( sport = :$1 )" 2>/dev/null | grep -q .; }
 
+# Every lane is a worktree with a lanes env file, wherever it lives: made by
+# lanes new, Claude Code, Worktrunk or adopted. Not just the folders under
+# LANES_ROOT — ports and stacks of the others count too.
+worktrees() { git -C "$MAIN" worktree list --porcelain | sed -n 's/^worktree //p' | grep -vxF "$MAIN" || true; }
+lane_env_lines() {  # the env files of all lanes, concatenated
+  local w
+  while IFS= read -r w; do
+    [ -f "$w/$LANES_ENV_FILE" ] && cat "$w/$LANES_ENV_FILE"
+  done < <(worktrees)
+  return 0
+}
+
+# Picking ports and writing the env file is one step: parallel subagents
+# (WorktreeCreate hooks) would otherwise pick the same offset. The lock is
+# bash's noclobber (an exclusive create in the shell itself), not `mkdir`:
+# uutils mkdir, the default on newer Ubuntu, lets two racing calls both win.
+lock_lanes() {
+  LANES_LOCK="$(cd "$MAIN" && cd "$(git rev-parse --git-common-dir)" && pwd)/lanes.lock"
+  local _
+  for _ in $(seq 1 60); do
+    if ( set -C; echo "$$" > "$LANES_LOCK" ) 2>/dev/null; then
+      trap 'rm -f "$LANES_LOCK"' EXIT; return 0
+    fi
+    sleep 0.5
+  done
+  die "another lanes command holds $LANES_LOCK (delete it if none is running)"
+}
+unlock_lanes() { rm -f "$LANES_LOCK"; trap - EXIT; }
+
 pick_offset() {
-  local n p name base taken
+  local n p name base taken used
+  used="$(lane_env_lines)"
   for n in $(seq 1 49); do
     taken=0
     for p in $LANES_PORTS; do
       name="${p%%=*}"; base="${p#*=}"
-      if grep -qx "$name=$((base + n))" "$LANES_ROOT"/*/"$LANES_ENV_FILE" 2>/dev/null \
+      if printf '%s\n' "$used" | grep -qx "$name=$((base + n))" \
          || port_taken $((base + n)); then taken=1; break; fi
     done
     [ "$taken" = 0 ] && { echo "$n"; return; }
@@ -134,8 +164,8 @@ write_env() {  # write_env <dir> <project> <offset>
 db_running_main() { main_compose ps --status running --services 2>/dev/null | grep -qx "$LANES_DB_SERVICE"; }
 
 wait_db() {
-  local i
-  for i in $(seq 1 30); do
+  local _
+  for _ in $(seq 1 30); do
     compose "$1" exec -T "$LANES_DB_SERVICE" sh -c 'pg_isready -q -U "$POSTGRES_USER"' 2>/dev/null && return 0
     sleep 2
   done
@@ -269,8 +299,10 @@ adopt_dir() {  # adopt_dir <dir> <index 0|1> <up 0|1> <db>
     log "$(basename "$dir") already has a lane runtime ($(project_of "$dir"))"
   else
     project="$LANES_NAME-$(slug_of "$(basename "$dir")")"
+    lock_lanes
     n=0; [ -n "$LANES_PORTS" ] && n="$(pick_offset)"
     write_env "$dir" "$project" "$n"
+    unlock_lanes
     log "lane runtime for $(basename "$dir"): project $project$( [ -n "$LANES_PORTS" ] && printf ', ports +%s' "$n")"
   fi
   [ "$index" = 1 ] && index_dir "$dir"
@@ -325,9 +357,11 @@ hook_create() {
   else branch="$LANES_AGENT_PREFIX/$slug"; fi
   dir="$LANES_ROOT/$(slug_of "$branch")"
   if [ ! -d "$dir" ]; then
+    local flags=()
+    [ "$LANES_HOOK_UP" = 1 ] || flags+=(--no-up)
+    [ "$LANES_HOOK_INDEX" = 1 ] || flags+=(--no-index)
     LANES_BRANCH_TYPES="$LANES_BRANCH_TYPES|$LANES_AGENT_PREFIX" \
-      cmd_new "$branch" --db "$LANES_DB_DEFAULT" $( [ "$LANES_HOOK_UP" = 1 ] || echo --no-up ) \
-      $( [ "$LANES_HOOK_INDEX" = 1 ] || echo --no-index ) >&2
+      cmd_new "$branch" --db "$LANES_DB_DEFAULT" "${flags[@]}" >&2
   else
     log "reusing existing lane $dir" >&2
   fi
@@ -468,24 +502,31 @@ merged_heads() {  # merged_heads <branch>
   esac
 }
 
-json_list() {  # json_list <field>  (stdin: JSON array) → one value per line
-  if command -v jq >/dev/null; then jq -r ".[].$1 // empty"
+json_list() {  # json_list <field>...  (stdin: JSON array) → one line per object, fields tab-separated
+  if command -v jq >/dev/null; then
+    local f; f="$(printf '(.%s // "" | tostring),' "$@")"
+    jq -r ".[] | [${f%,}] | @tsv"
   else python3 -c "import json,sys
-for o in json.load(sys.stdin): print(o.get('$1') or '')"; fi 2>/dev/null || true
+for o in json.load(sys.stdin): print('\t'.join(str(o.get(k) or '') for k in sys.argv[1:]))" "$@"; fi 2>/dev/null || true
+}
+
+# Where a branch started: the oldest entry of its reflog ("Created from …").
+# After a fast-forward merge the tip is an ancestor of the base too, so only
+# this tells a merged branch from a fresh one that has no commits yet.
+branch_start() {  # branch_start <branch> <tip>
+  local s
+  s="$(git -C "$MAIN" reflog show --format=%H "refs/heads/$1" 2>/dev/null | tail -1)"
+  [ -n "$s" ] || s="$(git -C "$MAIN" merge-base "$2" "$LANES_BASE" 2>/dev/null || true)"
+  echo "$s"
 }
 
 # Why a lane can go, or why it stays. Prints "prune <reason>" or "keep <reason>".
 prune_verdict() {  # prune_verdict <dir> <branch>
-  local dir="$1" b="$2" head start h
+  local dir="$1" b="$2" head h
   [ -n "$b" ] || { echo "keep detached HEAD"; return; }
   [ -z "$(git -C "$dir" status --porcelain -- . ":(exclude)$LANES_ENV_FILE" 2>/dev/null)" ] || { echo "keep uncommitted changes"; return; }
   head="$(git -C "$dir" rev-parse HEAD)"
-  # Where the branch started: the oldest entry of its reflog ("Created from …").
-  # After a fast-forward merge HEAD is an ancestor of the base too, so only this
-  # tells a merged lane from a fresh one.
-  start="$(git -C "$MAIN" reflog show --format=%H "refs/heads/$b" 2>/dev/null | tail -1)"
-  [ -n "$start" ] || start="$(git -C "$MAIN" merge-base "$head" "$LANES_BASE" 2>/dev/null || true)"
-  if [ "$head" = "$start" ]; then echo "keep no commits of its own yet"; return; fi
+  if [ "$head" = "$(branch_start "$b" "$head")" ]; then echo "keep no commits of its own yet"; return; fi
   if git -C "$MAIN" merge-base --is-ancestor "$head" "$LANES_BASE" 2>/dev/null; then
     echo "prune merged into $LANES_BASE"; return
   fi
@@ -501,7 +542,7 @@ prune_verdict() {  # prune_verdict <dir> <branch>
 }
 
 cmd_prune() {
-  local yes=0 path branch verdict n=0 orphans p
+  local yes=0 path branch verdict n=0 known p cfg
   [ "${1:-}" = --yes ] && yes=1
   quiet_git -C "$MAIN" fetch -q --prune origin || log "WARNING: git fetch failed — verdicts use local refs"
   git -C "$MAIN" worktree prune
@@ -514,15 +555,20 @@ cmd_prune() {
       if [ "$yes" = 1 ]; then LANES_DROP_BRANCH=1 cmd_rm "$path" --force; fi
     fi
   done < <(git -C "$MAIN" worktree list --porcelain | awk '/^worktree /{p=$2} /^branch /{sub("refs/heads/","",$2); print p" "$2} /^detached/{print p" "}')
-  # Compose projects of lanes whose folder is gone.
+  # Compose stacks of lanes whose worktree is gone. `down -v` drops a database,
+  # so only a stack lanes started itself (compose file under LANES_ROOT) that no
+  # worktree claims — never another project with a similar name, nor a stack
+  # of a worktree another tool keeps elsewhere.
   if command -v docker >/dev/null; then
-    orphans="$(docker compose ls -a --format json 2>/dev/null | json_list Name | grep -E "^$LANES_NAME-" || true)"
-    for p in $orphans; do
-      [ -n "$(grep -lx "COMPOSE_PROJECT_NAME=$p" "$LANES_ROOT"/*/"$LANES_ENV_FILE" 2>/dev/null)" ] && continue
-      printf '%-6s %-48s %s\n' prune "compose project $p" "(no lane folder left)"
+    known="$(lane_env_lines | sed -n 's/^COMPOSE_PROJECT_NAME=//p')"
+    while IFS=$'\t' read -r p cfg; do
+      case "$p" in "$LANES_NAME"-*) ;; *) continue;; esac
+      case "${cfg%%,*}" in "$LANES_ROOT"/*) ;; *) continue;; esac
+      printf '%s\n' "$known" | grep -qxF "$p" && continue
+      printf '%-6s %-48s %s\n' prune "compose project $p" "(its lane is gone)"
       n=$((n + 1))
       if [ "$yes" = 1 ]; then docker compose -p "$p" down -v --remove-orphans >/dev/null 2>&1 || true; fi
-    done
+    done < <(docker compose ls -a --format json 2>/dev/null | json_list Name ConfigFiles)
   fi
   if [ "$n" = 0 ]; then log "nothing to prune"
   elif [ "$yes" = 0 ]; then log "$n to prune — run: lanes prune --yes"
@@ -557,6 +603,8 @@ cmd_sync() {
     [ "$b" = "$LANES_DEFAULT_BRANCH" ] && continue
     echo "$inlane" | grep -qx "$b" && continue
     tip="$(git -C "$MAIN" rev-parse "$b")"
+    # A branch made to start on later points into the base too; it is not merged work.
+    [ "$tip" = "$(branch_start "$b" "$tip")" ] && continue
     if git -C "$MAIN" merge-base --is-ancestor "$b" "$LANES_BASE"; then
       git -C "$MAIN" branch -q -D "$b" && log "deleted branch $b (in $LANES_BASE)"; continue
     fi
@@ -568,6 +616,11 @@ cmd_sync() {
   [ -z "$gone_left" ] || log "remote branch gone but not confirmed merged, kept:$gone_left"
   index_dir "$MAIN"
   log "sync done"
+}
+
+plugin_enabled() {  # plugin_enabled <repo top>: lanes plugin on for the user or the project
+  grep -qsE '"lanes@xudo-lanes" *: *true' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" \
+    "$1/.claude/settings.json" "$1/.claude/settings.local.json"
 }
 
 cmd_doctor() {
@@ -595,8 +648,9 @@ cmd_doctor() {
     gitlab) check "glab CLI (listing drafts)" "command -v glab >/dev/null" "optional: claim works through push options";;
   esac
   gitnexus_bin >/dev/null && echo "  ok    GitNexus found: one index per lane" || echo "  --    GitNexus not found (optional)"
-  check "SessionStart hook in .claude/settings.json" "grep -q 'lanes' '$top/.claude/settings.json' 2>/dev/null" \
-    "copy templates/settings.json"
+  check "SessionStart briefing (lanes plugin, or a hook in .claude/settings.json)" \
+    "plugin_enabled '$top' || grep -qs 'lanes status' '$top/.claude/settings.json'" \
+    "claude plugin install lanes@xudo-lanes, or copy templates/settings.json"
   [ "$ok" = 1 ] && echo "Ready." || echo "Fix the items above, then: lanes new feat/try-it"
 }
 
