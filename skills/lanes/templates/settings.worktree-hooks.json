@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "lanes hook worktree-create",
+            "timeout": 300,
+            "statusMessage": "lanes: creating a lane"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "lanes hook worktree-remove",
+            "timeout": 120,
+            "statusMessage": "lanes: removing the lane"
+          }
+        ]
+      }
+    ]
+  }
+}

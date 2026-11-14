@@ -63,6 +63,9 @@ lanes rm feat-invoice-export      # merged? stack, volumes, images, index and fo
 | `lanes up` / `down` / `url` | stack control inside a lane |
 | `lanes rm <name> [--force]` | removes everything; refuses uncommitted or unpushed work |
 | `lanes doctor` | readiness check: compose file, ports, env file, CLIs, hook |
+| `lanes adopt [dir] [--up]` | give a worktree made by any tool its lane runtime |
+| `lanes release [dir]` | stop a lane's runtime, keep the worktree |
+| `lanes hook worktree-create\|worktree-remove` | Claude Code `WorktreeCreate` / `WorktreeRemove` hooks |
 
 ## Configuration
 
@@ -98,6 +101,32 @@ sessions, commits, pipeline, deploy and servers. Examples:
 
 Every finding comes with evidence and a concrete fix. It only reads; it never changes
 settings. See [`references/audit.md`](skills/lanes/references/audit.md).
+
+## Works with the tools you already use
+
+lanes doesn't need to own your worktrees. Whatever makes them, lanes adds the runtime and
+the coordination.
+
+**Claude Code worktrees (built in).** Add
+[`templates/settings.worktree-hooks.json`](skills/lanes/templates/settings.worktree-hooks.json)
+to `.claude/settings.json`. Every worktree Claude Code creates then becomes a lane. That
+covers `claude --worktree`, `EnterWorktree`, subagents with `isolation: "worktree"`,
+background sessions and workflows:
+- a random name like `bold-oak-a3f2` becomes branch `agent/bold-oak-a3f2`;
+- `feat-auth` becomes `feat/auth`;
+- each lane gets its own ports and env file, plus a code index;
+- the stack only starts when you ask (`LANES_HOOK_UP=1`), so subagents stay fast;
+- when Claude removes the worktree, lanes refuses if there is uncommitted or unpushed work;
+  otherwise it removes everything, branch included.
+
+**Worktrunk.** Let Worktrunk create and switch worktrees, and let lanes run inside its hooks.
+[`templates/wt.toml`](skills/lanes/templates/wt.toml) runs `lanes adopt` in `pre-start`,
+`lanes up` in `post-start` and `lanes release` in `pre-remove`. *(Written from Worktrunk's
+hook docs; not yet tested end to end, so reports are welcome.)*
+
+**Anything else** (desktop orchestrators, kanban boards, plain `git worktree add`): put
+`lanes adopt "$PWD" --up` in the tool's setup script and `lanes release "$PWD"` in its
+teardown script.
 
 ## Related tools
 

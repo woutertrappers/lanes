@@ -56,6 +56,19 @@ call it by its path or offer to symlink it into `~/.local/bin`.
 6. Prove it: `lanes new feat/lanes-smoke`, check the app URL, `lanes rm feat-lanes-smoke --force`.
 7. Commit on a branch; do not push or merge without the user.
 
+## Integrations
+
+- **Claude Code worktrees.** Merge `templates/settings.worktree-hooks.json` into
+  `.claude/settings.json` to make every Claude-made worktree a lane. That covers
+  `--worktree`, `EnterWorktree`, subagents with `isolation: "worktree"`, background sessions
+  and workflows. Suggest it when the user runs subagents in worktrees. Warn that it replaces
+  Claude's default worktree creation, and that `.worktreeinclude` is then ignored (lanes
+  copies the env file itself).
+- **Worktrunk.** `templates/wt.toml` goes in `.config/wt.toml`: adopt, up and release in
+  Worktrunk's hooks. It is untested, so say so.
+- **Other tools.** `lanes adopt "$PWD" --up` in their setup script, `lanes release "$PWD"`
+  in their teardown.
+
 ## Commands
 
 | Command | Does |
@@ -69,6 +82,9 @@ call it by its path or offer to symlink it into `~/.local/bin`.
 | `lanes up` / `down` / `url` | stack control inside a lane |
 | `lanes rm <name>` | stack, volumes, images, index and worktree gone; refuses unpushed work |
 | `lanes doctor` | readiness check for the current repo |
+| `lanes adopt [dir] [--up]` | lane runtime for a worktree made by another tool |
+| `lanes release [dir]` | stop the runtime, keep the worktree |
+| `lanes hook worktree-create\|worktree-remove` | Claude Code worktree hooks |
 
 Databases: `--db clone` copies the main checkout's Postgres (roles included) so logins work
 straight away; `--db empty` runs `LANES_DB_BOOTSTRAP`; `--db none` skips it.

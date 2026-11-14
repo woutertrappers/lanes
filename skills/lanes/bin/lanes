@@ -19,6 +19,9 @@
 #   lanes url                         # in a lane: the app URL
 #   lanes rm <name> [--force]         # stack, volumes, images, index and worktree gone
 #   lanes doctor                      # check this repo is ready for lanes
+#   lanes adopt [dir] [--up]          # give an existing worktree (any tool) its lane runtime
+#   lanes release [dir]               # stop a lane's runtime, keep the worktree
+#   lanes hook worktree-create|worktree-remove   # Claude Code WorktreeCreate/Remove hooks
 #
 # Per-repo settings live in .lanes.conf at the repo root (a bash file, sourced;
 # the current checkout's copy wins over the main checkout's).
@@ -50,6 +53,9 @@ LANES_DB_SERVICE=""                      # postgres service name, e.g. "postgres
 LANES_DB_BOOTSTRAP=""                    # compose args for --db empty (shell-quoted), e.g. "run --rm --no-deps backend npm run db:migrate"
 LANES_DB_DEFAULT="auto"                  # auto = clone if the main stack's DB runs, else empty
 LANES_GITNEXUS="auto"                    # auto | off
+LANES_AGENT_PREFIX="agent"               # branch prefix for Claude-made worktrees with a random name
+LANES_HOOK_UP=0                          # WorktreeCreate: also build + start the stack (slow for subagents)
+LANES_HOOK_INDEX=1                       # WorktreeCreate: build the GitNexus index (if installed)
 # The checkout you're in wins, so a branch that changes .lanes.conf works
 # before it is merged; otherwise the main checkout's.
 _conf="$(git rev-parse --show-toplevel 2>/dev/null)/.lanes.conf"
@@ -114,7 +120,7 @@ write_env() {  # write_env <dir> <project> <offset>
   keys="COMPOSE_PROJECT_NAME$(for p in $(port_names); do printf '|%s' "$p"; done)"
   for line in $LANES_EXTRA_ENV; do keys="$keys|${line%%=*}"; done
   ( umask 077
-    { [ -n "$base" ] && echo "$base" | grep -Ev "^(${keys})="
+    { if [ -n "$base" ]; then echo "$base" | grep -Ev "^(${keys})=" || true; fi
       echo ""
       echo "# --- lanes (this lane only) ---"
       echo "COMPOSE_PROJECT_NAME=$project"
@@ -244,13 +250,102 @@ cmd_new() {
   else
     git -C "$MAIN" worktree add -q --no-track -b "$branch" "$dir" "$from"
   fi
-  n=0; [ -n "$LANES_PORTS" ] && n="$(pick_offset)"
-  write_env "$dir" "$project" "$n"
-  log "lane $dir on $branch (from $from), project $project$( [ -n "$LANES_PORTS" ] && printf ', ports +%s' "$n")"
-  [ "$index" = 1 ] && index_dir "$dir"
-  if [ "$up" = 1 ]; then LANE_DIR="$dir" cmd_up --db "$db"; fi
+  log "worktree $dir on $branch (from $from)"
+  adopt_dir "$dir" "$index" "$up" "$db"
   echo ""
   echo "  cd $dir    # start your agent session here"
+}
+
+# Give a worktree that already exists (made by lanes, Claude Code, Worktrunk,
+# a desktop orchestrator, plain `git worktree add`) its lane runtime: env file
+# with its own compose project and ports, optionally index + stack.
+adopt_dir() {  # adopt_dir <dir> <index 0|1> <up 0|1> <db>
+  local dir="$1" index="$2" up="$3" db="$4" project n
+  [ "$dir" != "$MAIN" ] || die "the main checkout is not a lane"
+  git -C "$dir" rev-parse --show-toplevel >/dev/null 2>&1 || die "$dir is not a git worktree"
+  if [ -n "$(project_of "$dir")" ]; then
+    log "$(basename "$dir") already has a lane runtime ($(project_of "$dir"))"
+  else
+    project="$LANES_NAME-$(slug_of "$(basename "$dir")")"
+    n=0; [ -n "$LANES_PORTS" ] && n="$(pick_offset)"
+    write_env "$dir" "$project" "$n"
+    log "lane runtime for $(basename "$dir"): project $project$( [ -n "$LANES_PORTS" ] && printf ', ports +%s' "$n")"
+  fi
+  [ "$index" = 1 ] && index_dir "$dir"
+  if [ "$up" = 1 ]; then LANE_DIR="$dir" cmd_up --db "$db"; fi
+  return 0
+}
+
+cmd_adopt() {
+  local dir="" index=1 up=0 db="$LANES_DB_DEFAULT"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --up) up=1; shift;; --no-index) index=0; shift;; --db) db="$2"; shift 2;;
+      -*) die "adopt: unknown flag $1";; *) dir="$1"; shift;;
+    esac
+  done
+  dir="$(cd "${dir:-.}" && git rev-parse --show-toplevel)"
+  adopt_dir "$dir" "$index" "$up" "$db"
+}
+
+# Stop a lane's runtime without touching the worktree (for tools that remove
+# the worktree themselves, e.g. a Worktrunk pre-remove hook).
+release_dir() {
+  local dir="$1" gx
+  if has_stack "$dir" && [ -n "$(project_of "$dir")" ]; then
+    log "stopping $(project_of "$dir"), dropping its volumes and images..."
+    compose "$dir" down -v --rmi local --remove-orphans >/dev/null 2>&1 || true
+  fi
+  if gx="$(gitnexus_bin)"; then $gx remove --force "$LANES_NAME-$(basename "$dir")" >/dev/null 2>&1 || true; fi
+  # Containers often write root-owned files into bind mounts; hand them back.
+  command -v docker >/dev/null && docker run --rm -v "$dir:/w" alpine:3.20 chown -R "$(id -u):$(id -g)" /w >/dev/null 2>&1 || true
+}
+
+cmd_release() { local dir; dir="$(cd "${1:-.}" && git rev-parse --show-toplevel)"; [ "$dir" != "$MAIN" ] || die "the main checkout is not a lane"; release_dir "$dir"; log "released $(basename "$dir")"; }
+
+# ── Claude Code integration: WorktreeCreate / WorktreeRemove hooks ──
+# With these hooks configured, every worktree Claude Code makes (claude
+# --worktree, EnterWorktree, subagents with isolation: "worktree", background
+# sessions, workflows) is a lane. Contract: stdin is JSON; WorktreeCreate
+# prints the worktree path as the last stdout line, everything else to stderr.
+json_field() {  # json_field <field>  (stdin)
+  if command -v jq >/dev/null; then jq -r ".$1 // empty"
+  else python3 -c "import json,sys; print(json.load(sys.stdin).get('$1') or '')"; fi
+}
+
+hook_create() {
+  local name branch slug dir
+  name="$(json_field name)"
+  [ -n "$name" ] || die "WorktreeCreate: no name in the hook input"
+  slug="$(slug_of "$name")"
+  # "feat-x" or "feat/x" → feat/x; anything else (e.g. bold-oak-a3f2) → agent/<name>
+  if [[ "$name" =~ ^($LANES_BRANCH_TYPES)[-/](.+)$ ]]; then branch="${BASH_REMATCH[1]}/$(slug_of "${BASH_REMATCH[2]}")"
+  else branch="$LANES_AGENT_PREFIX/$slug"; fi
+  dir="$LANES_ROOT/$(slug_of "$branch")"
+  if [ ! -d "$dir" ]; then
+    LANES_BRANCH_TYPES="$LANES_BRANCH_TYPES|$LANES_AGENT_PREFIX" \
+      cmd_new "$branch" --db "$LANES_DB_DEFAULT" $( [ "$LANES_HOOK_UP" = 1 ] || echo --no-up ) \
+      $( [ "$LANES_HOOK_INDEX" = 1 ] || echo --no-index ) >&2
+  else
+    log "reusing existing lane $dir" >&2
+  fi
+  echo "$dir"
+}
+
+hook_remove() {
+  local dir
+  dir="$(json_field worktree_path)"
+  [ -n "$dir" ] && [ -d "$dir" ] || exit 0
+  # Claude Code only checks for changes with git; this is the last check.
+  cmd_rm "$dir" >&2
+}
+
+cmd_hook() {
+  case "${1:-}" in
+    worktree-create) hook_create;;
+    worktree-remove) hook_remove;;
+    *) die "hook: worktree-create | worktree-remove";;
+  esac
 }
 
 cmd_down() { local dir; dir="$(require_lane)"; has_stack "$dir" && compose "$dir" down; }
@@ -335,7 +430,7 @@ cmd_status() {
 }
 
 cmd_rm() {
-  local name="" force=0 dir branch unpushed gx
+  local name="" force=0 dir branch unpushed
   while [ $# -gt 0 ]; do case "$1" in --force) force=1; shift;; *) name="$1"; shift;; esac; done
   [ -n "$name" ] || die "usage: lanes rm <name|path> [--force]"
   dir="$name"; [ -d "$dir" ] || dir="$LANES_ROOT/$(slug_of "$name")"
@@ -349,13 +444,7 @@ cmd_rm() {
     else unpushed="$(git -C "$dir" log --oneline "$LANES_BASE.." | wc -l)"; fi
     [ "$unpushed" = 0 ] || die "$branch has $unpushed commit(s) not on the remote (push, or --force)"
   fi
-  if has_stack "$dir" && [ -n "$(project_of "$dir")" ]; then
-    log "stopping $(project_of "$dir"), dropping its volumes and images..."
-    compose "$dir" down -v --rmi local --remove-orphans >/dev/null 2>&1 || true
-  fi
-  if gx="$(gitnexus_bin)"; then $gx remove --force "$LANES_NAME-$(basename "$dir")" >/dev/null 2>&1 || true; fi
-  # Containers often write root-owned files into bind mounts; hand them back.
-  command -v docker >/dev/null && docker run --rm -v "$dir:/w" alpine:3.20 chown -R "$(id -u):$(id -g)" /w >/dev/null 2>&1 || true
+  release_dir "$dir"
   local flags=(); [ "$force" = 1 ] && flags=(--force --force)
   git -C "$MAIN" worktree remove "${flags[@]}" "$dir"
   if [ -n "$branch" ] && git -C "$MAIN" merge-base --is-ancestor "$branch" "$LANES_BASE" 2>/dev/null; then
@@ -406,6 +495,9 @@ case "${1:-}" in
   url) shift; cmd_url "$@";;
   rm) shift; cmd_rm "$@";;
   doctor) shift; cmd_doctor "$@";;
-  ""|-h|--help|help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//';;
+  adopt) shift; cmd_adopt "$@";;
+  release) shift; cmd_release "$@";;
+  hook) shift; cmd_hook "$@";;
+  ""|-h|--help|help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//';;
   *) die "unknown command $1 (lanes help)";;
 esac

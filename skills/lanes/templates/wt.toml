@@ -1,0 +1,15 @@
+# Worktrunk (https://worktrunk.dev) + lanes: Worktrunk manages the worktrees,
+# lanes gives each one its runtime (ports, compose project, DB, code index).
+# Save as .config/wt.toml in your repo (or merge into an existing one).
+
+# Blocking, once per new worktree: env file with its own ports + project name.
+pre-start = "lanes adopt {{ worktree_path }}"
+
+# Background, once per new worktree: build and start the stack, seed the DB.
+[post-start]
+stack = "cd {{ worktree_path }} && lanes up"
+
+# Blocking, before Worktrunk removes the worktree: stop the stack, drop
+# volumes, images and the code index. Worktrunk then removes the folder.
+[pre-remove]
+lanes = "lanes release {{ worktree_path }}"
