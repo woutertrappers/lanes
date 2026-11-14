@@ -18,6 +18,7 @@
 #   lanes index                       # (re)build this checkout's GitNexus index, if installed
 #   lanes url                         # in a lane: the app URL
 #   lanes rm <name> [--force]         # stack, volumes, images, index and worktree gone
+#   lanes prune [--yes]               # remove every lane whose work is merged (dry run without --yes)
 #   lanes doctor                      # check this repo is ready for lanes
 #   lanes adopt [dir] [--up]          # give an existing worktree (any tool) its lane runtime
 #   lanes release [dir]               # stop a lane's runtime, keep the worktree
@@ -447,10 +448,84 @@ cmd_rm() {
   release_dir "$dir"
   local flags=(); [ "$force" = 1 ] && flags=(--force --force)
   git -C "$MAIN" worktree remove "${flags[@]}" "$dir"
-  if [ -n "$branch" ] && git -C "$MAIN" merge-base --is-ancestor "$branch" "$LANES_BASE" 2>/dev/null; then
-    git -C "$MAIN" branch -D "$branch" >/dev/null && log "deleted local branch $branch (already in $LANES_BASE)"
+  if [ -n "$branch" ] && { [ "${LANES_DROP_BRANCH:-0}" = 1 ] || git -C "$MAIN" merge-base --is-ancestor "$branch" "$LANES_BASE" 2>/dev/null; }; then
+    git -C "$MAIN" branch -D "$branch" >/dev/null && log "deleted local branch $branch (merged)"
   elif [ -n "$branch" ]; then log "kept local branch $branch (not in $LANES_BASE)"; fi
   log "removed $dir"
+}
+
+# Head commits of merged PRs/MRs for a branch (squash merges leave no trace in
+# the base branch's history, so ask the forge).
+merged_heads() {  # merged_heads <branch>
+  case "$(forge)" in
+    gitlab) command -v glab >/dev/null || return 0
+            ( cd "$MAIN" && timeout 15 glab mr list --merged --source-branch "$1" -F json 2>/dev/null ) \
+              | json_list sha;;
+    github) command -v gh >/dev/null || return 0
+            ( cd "$MAIN" && timeout 15 gh pr list --state merged --head "$1" --json headRefOid 2>/dev/null ) \
+              | json_list headRefOid;;
+  esac
+}
+
+json_list() {  # json_list <field>  (stdin: JSON array) → one value per line
+  if command -v jq >/dev/null; then jq -r ".[].$1 // empty"
+  else python3 -c "import json,sys
+for o in json.load(sys.stdin): print(o.get('$1') or '')"; fi 2>/dev/null || true
+}
+
+# Why a lane can go, or why it stays. Prints "prune <reason>" or "keep <reason>".
+prune_verdict() {  # prune_verdict <dir> <branch>
+  local dir="$1" b="$2" head start h
+  [ -n "$b" ] || { echo "keep detached HEAD"; return; }
+  [ -z "$(git -C "$dir" status --porcelain 2>/dev/null)" ] || { echo "keep uncommitted changes"; return; }
+  head="$(git -C "$dir" rev-parse HEAD)"
+  # Where the branch started: the oldest entry of its reflog ("Created from …").
+  # After a fast-forward merge HEAD is an ancestor of the base too, so only this
+  # tells a merged lane from a fresh one.
+  start="$(git -C "$MAIN" reflog show --format=%H "refs/heads/$b" 2>/dev/null | tail -1)"
+  [ -n "$start" ] || start="$(git -C "$MAIN" merge-base "$head" "$LANES_BASE" 2>/dev/null || true)"
+  if [ "$head" = "$start" ]; then echo "keep no commits of its own yet"; return; fi
+  if git -C "$MAIN" merge-base --is-ancestor "$head" "$LANES_BASE" 2>/dev/null; then
+    echo "prune merged into $LANES_BASE"; return
+  fi
+  for h in $(merged_heads "$b"); do
+    if [ "$h" = "$head" ] || git -C "$MAIN" merge-base --is-ancestor "$head" "$h" 2>/dev/null; then
+      echo "prune merged PR/MR (squash) at ${h:0:8}"; return
+    fi
+    if git -C "$MAIN" merge-base --is-ancestor "$h" "$head" 2>/dev/null; then
+      echo "keep $(git -C "$MAIN" rev-list --count "$h..$head") commit(s) after the merged PR/MR"; return
+    fi
+  done
+  echo "keep not merged"
+}
+
+cmd_prune() {
+  local yes=0 path branch verdict n=0 orphans p
+  [ "${1:-}" = --yes ] && yes=1
+  quiet_git -C "$MAIN" fetch -q --prune origin || log "WARNING: git fetch failed — verdicts use local refs"
+  git -C "$MAIN" worktree prune
+  while read -r path branch; do
+    [ "$path" = "$MAIN" ] && continue
+    verdict="$(prune_verdict "$path" "$branch")"
+    printf '%-6s %-48s %s\n' "${verdict%% *}" "${path/#$HOME/\~}" "(${branch:-detached}) ${verdict#* }"
+    if [ "${verdict%% *}" = prune ]; then
+      n=$((n + 1))
+      if [ "$yes" = 1 ]; then LANES_DROP_BRANCH=1 cmd_rm "$path" --force; fi
+    fi
+  done < <(git -C "$MAIN" worktree list --porcelain | awk '/^worktree /{p=$2} /^branch /{sub("refs/heads/","",$2); print p" "$2} /^detached/{print p" "}')
+  # Compose projects of lanes whose folder is gone.
+  if command -v docker >/dev/null; then
+    orphans="$(docker compose ls -a --format json 2>/dev/null | json_list Name | grep -E "^$LANES_NAME-" || true)"
+    for p in $orphans; do
+      [ -n "$(grep -lx "COMPOSE_PROJECT_NAME=$p" "$LANES_ROOT"/*/"$LANES_ENV_FILE" 2>/dev/null)" ] && continue
+      printf '%-6s %-48s %s\n' prune "compose project $p" "(no lane folder left)"
+      n=$((n + 1))
+      if [ "$yes" = 1 ]; then docker compose -p "$p" down -v --remove-orphans >/dev/null 2>&1 || true; fi
+    done
+  fi
+  if [ "$n" = 0 ]; then log "nothing to prune"
+  elif [ "$yes" = 0 ]; then log "$n to prune — run: lanes prune --yes"
+  else log "pruned $n"; fi
 }
 
 cmd_doctor() {
@@ -496,8 +571,9 @@ case "${1:-}" in
   rm) shift; cmd_rm "$@";;
   doctor) shift; cmd_doctor "$@";;
   adopt) shift; cmd_adopt "$@";;
+  prune) shift; cmd_prune "$@";;
   release) shift; cmd_release "$@";;
   hook) shift; cmd_hook "$@";;
-  ""|-h|--help|help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//';;
+  ""|-h|--help|help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//';;
   *) die "unknown command $1 (lanes help)";;
 esac

@@ -37,8 +37,9 @@ call it by its path or offer to symlink it into `~/.local/bin`.
    <env> exec <service> …`), never by a fixed container name.
 7. **Code index:** if GitNexus is installed, run `lanes index` after a rebase or large change
    and before impact / detect-changes.
-8. **Clean up** with `lanes rm <name>` only when the user says the work is merged or dropped.
-   Never pass `--force` without asking.
+8. **Clean up** with `lanes rm <name>` only when the user says the work is merged or dropped,
+   or run `lanes prune` (a dry run) after merges and show its list. Never pass `--force` or
+   `--yes` without asking.
 9. **Never deploy or touch servers from a lane.** That is the integrator's job.
 
 ## Set up a repo
@@ -81,6 +82,7 @@ call it by its path or offer to symlink it into `~/.local/bin`.
 | `lanes index` | refresh the GitNexus index of this checkout |
 | `lanes up` / `down` / `url` | stack control inside a lane |
 | `lanes rm <name>` | stack, volumes, images, index and worktree gone; refuses unpushed work |
+| `lanes prune [--yes]` | every merged lane gone (merge, fast-forward or squash via the forge); keeps dirty, fresh and changed-after-merge lanes; also stops orphaned stacks |
 | `lanes doctor` | readiness check for the current repo |
 | `lanes adopt [dir] [--up]` | lane runtime for a worktree made by another tool |
 | `lanes release [dir]` | stop the runtime, keep the worktree |

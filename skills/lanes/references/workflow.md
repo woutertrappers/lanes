@@ -44,7 +44,8 @@ warnings before you write code.
 1. Mark the draft ready; wait for a green pipeline.
 2. The integrator merges, pulls `main` in the main checkout, refreshes its index.
 3. `lanes rm <name>` removes the stack, volumes, images, index and folder. It refuses while
-   work is uncommitted or unpushed.
+   work is uncommitted or unpushed. After a round of merges, `lanes prune` lists every lane
+   whose work is merged (squash merges too) and `lanes prune --yes` removes them.
 
 ## Shared things outside git
 

@@ -48,6 +48,7 @@ lanes claim                       # after the first commit: draft PR = "I'm on t
 lanes ls                          # all lanes: branch, port, stack, ahead/behind, dirty
 lanes overlap                     # who else touches the files you touch
 lanes rm feat-invoice-export      # merged? stack, volumes, images, index and folder gone
+lanes prune                       # or clean up every merged lane at once (dry run; --yes to do it)
 ```
 
 ## Commands
@@ -62,6 +63,7 @@ lanes rm feat-invoice-export      # merged? stack, volumes, images, index and fo
 | `lanes index` | rebuild this checkout's GitNexus index |
 | `lanes up` / `down` / `url` | stack control inside a lane |
 | `lanes rm <name> [--force]` | removes everything; refuses uncommitted or unpushed work |
+| `lanes prune [--yes]` | after merges: removes every lane whose work is merged, squash merges included (asks the forge); dry run without `--yes` |
 | `lanes doctor` | readiness check: compose file, ports, env file, CLIs, hook |
 | `lanes adopt [dir] [--up]` | give a worktree made by any tool its lane runtime |
 | `lanes release [dir]` | stop a lane's runtime, keep the worktree |
