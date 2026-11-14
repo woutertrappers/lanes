@@ -28,7 +28,7 @@ found these problems in a real project.
 ## Quick start
 
 ```bash
-git clone https://github.com/<owner>/lanes ~/src/lanes
+git clone https://github.com/woutertrappers/lanes ~/src/lanes
 ~/src/lanes/install.sh            # skill → ~/.claude/skills/lanes, CLI → ~/.local/bin/lanes
 
 cd ~/code/myapp

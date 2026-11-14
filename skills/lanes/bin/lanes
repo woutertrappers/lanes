@@ -23,7 +23,7 @@
 # Per-repo settings live in .lanes.conf at the repo root (a bash file, sourced).
 # Every setting has a default; see the skill's templates/lanes.conf.
 #
-# MIT License — https://github.com/<owner>/lanes
+# MIT License — https://github.com/woutertrappers/lanes
 
 set -euo pipefail
 
