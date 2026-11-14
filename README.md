@@ -27,10 +27,33 @@ found these problems in a real project.
 
 ## Quick start
 
+Install it as a Claude Code plugin:
+
+```bash
+claude plugin marketplace add woutertrappers/lanes
+claude plugin install lanes@xudo-lanes
+```
+
+That gives Claude the skill, the `lanes` CLI and the session-start briefing (only in repos
+with a `.lanes.conf`). Update with `claude plugin update lanes@xudo-lanes`.
+
+The plugin puts `lanes` on Claude's PATH only. For your own terminal, the `git post-merge`
+alias and the worktree hooks, also install the CLI from a clone:
+
 ```bash
 git clone https://github.com/woutertrappers/lanes ~/src/lanes
-~/src/lanes/install.sh            # skill → ~/.claude/skills/lanes, CLI → ~/.local/bin/lanes
+~/src/lanes/install.sh --cli-only   # CLI → ~/.local/bin/lanes
+```
 
+Or skip the plugin and install everything from the clone, updated with `git pull`:
+
+```bash
+~/src/lanes/install.sh            # skill → ~/.claude/skills/lanes, CLI → ~/.local/bin/lanes
+```
+
+Then:
+
+```bash
 cd ~/code/myapp
 lanes doctor                      # what this repo needs (usually: drop container_name, env ports)
 ```
@@ -167,6 +190,11 @@ It is a small bash script plus a Claude Code skill, so you can read every line.
 
 Tested on Linux and WSL2. macOS should work (it needs `ss`, or edit `port_taken`); reports
 welcome.
+
+## Help with setup or your dev process
+
+Need a hand setting up lanes in your team, or with the CI/CD and deploy flow around it?
+I do this as consultancy at [Xudo](https://xudo.be): admin@xudo.be.
 
 ## License
 

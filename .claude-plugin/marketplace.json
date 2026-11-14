@@ -1,0 +1,8 @@
+{
+  "name": "xudo-lanes",
+  "description": "lanes: parallel Claude Code sessions on one repo, without collisions.",
+  "owner": { "name": "Xudo", "email": "admin@xudo.be", "url": "https://xudo.be" },
+  "plugins": [
+    { "name": "lanes", "source": "./" }
+  ]
+}

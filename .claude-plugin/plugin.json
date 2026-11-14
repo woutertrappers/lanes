@@ -1,0 +1,10 @@
+{
+  "name": "lanes",
+  "displayName": "lanes",
+  "description": "Run several Claude Code sessions on one repo without collisions: a worktree, dev stack, database and branch per session, draft PRs as claims, a session-start briefing, and an audit of your dev process.",
+  "author": { "name": "Wouter Trappers", "email": "admin@xudo.be", "url": "https://xudo.be" },
+  "homepage": "https://github.com/woutertrappers/lanes",
+  "repository": "https://github.com/woutertrappers/lanes",
+  "license": "MIT",
+  "keywords": ["worktree", "parallel-sessions", "multi-agent", "docker-compose", "dev-process"]
+}

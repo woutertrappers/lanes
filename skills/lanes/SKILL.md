@@ -10,8 +10,11 @@ in one window moves the ground under the others), the dev stack (fixed container
 ports), the database, and shared docs everybody edits. `lanes` gives every session its own
 lane and makes the others visible.
 
-The CLI is `bin/lanes` in this skill. Check it is on PATH (`command -v lanes`); if not,
-call it by its path or offer to symlink it into `~/.local/bin`.
+The CLI is `lanes`. Installed as a plugin, it is on your Bash PATH (the plugin's `bin/`);
+installed with `install.sh`, it is in `~/.local/bin`. If `command -v lanes` fails, it lives at
+`../../bin/lanes` from this skill's directory. Hooks in `.claude/settings.json`, git aliases
+and the user's own terminal need `lanes` on the real PATH: if it is not there, offer
+`git clone https://github.com/woutertrappers/lanes ~/src/lanes && ~/src/lanes/install.sh --cli-only`.
 
 ## Decide which mode
 
@@ -50,8 +53,11 @@ call it by its path or offer to symlink it into `~/.local/bin`.
 3. Make the dev compose file lane-safe: remove `container_name:` lines, read host ports from
    env vars (`'${FRONTEND_PORT:-5173}:5173'`), keep in-container ports fixed. If CORS or a
    callback URL hardcodes a port, make it accept any port or read it from env.
-4. Merge `templates/settings.json` into `.claude/settings.json` (keep existing hooks), and
-   make sure `.claude/settings.json` is not gitignored.
+4. Session-start briefing: with the lanes plugin installed, nothing to do, its hook runs
+   `lanes status` in every repo that has `.lanes.conf`. Without the plugin (or for teammates
+   who don't have it), merge `templates/settings.json` into `.claude/settings.json` (keep
+   existing hooks) and make sure `.claude/settings.json` is not gitignored. The plugin then
+   steps aside, so nobody gets the briefing twice.
 5. Add `references/workflow.md` to the repo docs (adapted) and point the agent instructions
    file (CLAUDE.md / AGENTS.md) at it in two lines.
 6. Prove it: `lanes new feat/lanes-smoke`, check the app URL, `lanes rm feat-lanes-smoke --force`.
