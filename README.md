@@ -99,6 +99,27 @@ sessions, commits, pipeline, deploy and servers. Examples:
 Every finding comes with evidence and a concrete fix. It only reads; it never changes
 settings. See [`references/audit.md`](skills/lanes/references/audit.md).
 
+## Related tools
+
+Worktrees for parallel agents are a well-known pattern, and good tools exist:
+
+- **Claude Code** itself has `claude --worktree <name>`, and `.worktreeinclude` copies
+  ignored files such as `.env` into new worktrees.
+- **[Worktrunk](https://github.com/max-sixty/worktrunk)** manages worktrees with hooks,
+  build caches and a port per worktree.
+- **[git-worktree-runner](https://github.com/REN-100/git-worktree-runner)** and
+  **[agent-worktree](https://github.com/nekocode/agent-worktree)** are CLI managers.
+- Board- and desktop-style orchestrators run one agent per worktree.
+
+lanes doesn't try to replace them. It covers what a worktree alone leaves open:
+
+- **runtime isolation**: a compose project, a database clone and a code index per lane;
+- **coordination**: draft PRs as claims, file overlap between open branches, a session-start
+  briefing, and one writer for the shared docs;
+- **the rest of the process**: the audit.
+
+It is a small bash script plus a Claude Code skill, so you can read every line.
+
 ## Requirements
 
 - bash, git 2.20+ (worktrees);
