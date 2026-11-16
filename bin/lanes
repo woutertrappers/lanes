@@ -25,9 +25,9 @@
 #   lanes release [dir]               # stop a lane's runtime, keep the worktree
 #   lanes hook worktree-create|worktree-remove   # Claude Code WorktreeCreate/Remove hooks
 #
-# Per-repo settings live in .lanes.conf at the repo root (a bash file, sourced;
-# the current checkout's copy wins over the main checkout's).
-# Every setting has a default; see the skill's templates/lanes.conf.
+# Per-repo settings live in .lanes.conf at the repo root: KEY=value lines, read
+# as text and never executed (the current checkout's copy wins over the main
+# checkout's). Every setting has a default; see the skill's templates/lanes.conf.
 #
 # MIT License — https://github.com/woutertrappers/lanes
 
@@ -36,15 +36,17 @@ set -euo pipefail
 die() { echo "lanes: $*" >&2; exit 1; }
 log() { echo "[lanes] $*"; }
 
-MAIN="$(git worktree list --porcelain 2>/dev/null | awk 'NR==1 {print $2}')"
+slug_of() { echo "$1" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_\n-' '-'; }
+
+MAIN="$(git worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')"
 [ -n "$MAIN" ] || die "not inside a git repository"
 REPO="$(basename "$MAIN")"
 
 # ── settings (override in .lanes.conf) ───────────────────────────────
-LANES_NAME="$REPO"                       # compose project prefix: <name>-<slug>
+LANES_NAME="$(slug_of "$REPO")"          # compose project prefix: <name>-<slug>
 LANES_ROOT="$(dirname "$MAIN")/$REPO-lanes"
-LANES_BASE="origin/main"                 # new lanes branch from here
-LANES_DEFAULT_BRANCH="main"
+LANES_BASE=""                            # new lanes branch from here; default origin/<default branch>
+LANES_DEFAULT_BRANCH=""                  # default: origin's HEAD, else main or master
 LANES_BRANCH_TYPES="feat|fix|chore|docs|refactor|perf|test|style|ci|build"
 LANES_COMPOSE_FILE="docker-compose.yml"  # empty: lanes without a dev stack
 LANES_ENV_FILE=".env.local"              # copied from the main checkout into each lane
@@ -58,15 +60,57 @@ LANES_GITNEXUS="auto"                    # auto | off
 LANES_AGENT_PREFIX="agent"               # branch prefix for Claude-made worktrees with a random name
 LANES_HOOK_UP=0                          # WorktreeCreate: also build + start the stack (slow for subagents)
 LANES_HOOK_INDEX=1                       # WorktreeCreate: build the GitNexus index (if installed)
+LANES_SETTINGS=" LANES_NAME LANES_ROOT LANES_BASE LANES_DEFAULT_BRANCH LANES_BRANCH_TYPES
+  LANES_COMPOSE_FILE LANES_ENV_FILE LANES_PORTS LANES_EXTRA_ENV LANES_URL LANES_DB_SERVICE
+  LANES_DB_BOOTSTRAP LANES_DB_DEFAULT LANES_GITNEXUS LANES_AGENT_PREFIX LANES_HOOK_UP LANES_HOOK_INDEX "
+
+# .lanes.conf is data, not code: lanes runs at every session start (plugin
+# hook), also in a repo you just cloned. KEY=value, KEY="value" or
+# KEY='value', with an optional trailing comment. "$MAIN" and
+# "$(dirname "$MAIN")" are replaced as text; nothing else is expanded.
+read_conf() {  # read_conf <file>
+  local line key val re_dq='^"(.*)"[[:space:]]*(#.*)?$' re_sq="^'(.*)'[[:space:]]*(#.*)?\$"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^[[:space:]]*(LANES_[A-Z_]+)=(.*)$ ]] || continue
+    key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
+    case "$LANES_SETTINGS" in *[[:space:]]"$key"[[:space:]]*) ;; *) echo "lanes: ignoring unknown setting $key in $1" >&2; continue;; esac
+    if [[ "$val" =~ $re_dq ]] || [[ "$val" =~ $re_sq ]]; then val="${BASH_REMATCH[1]}"
+    else val="${val%%[[:space:]]#*}"; val="${val%"${val##*[![:space:]]}"}"; fi
+    val="${val//'$(dirname "$MAIN")'/$(dirname "$MAIN")}"
+    val="${val//'${MAIN}'/$MAIN}"; val="${val//'$MAIN'/$MAIN}"
+    printf -v "$key" '%s' "$val"
+  done < "$1"
+}
+
+check_settings() {
+  local p
+  [[ "$LANES_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "LANES_NAME '$LANES_NAME': lowercase letters, digits, - and _ only"
+  [[ "$LANES_AGENT_PREFIX" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "LANES_AGENT_PREFIX '$LANES_AGENT_PREFIX': lowercase letters, digits, - and _ only"
+  [[ "$LANES_BRANCH_TYPES" =~ ^[a-z0-9_|-]+$ ]] || die "LANES_BRANCH_TYPES '$LANES_BRANCH_TYPES': names separated by |"
+  for p in $LANES_PORTS; do
+    [[ "$p" =~ ^[A-Za-z_][A-Za-z0-9_]*=[0-9]+$ ]] || die "LANES_PORTS entry '$p': write NAME=port, e.g. FRONTEND_PORT=5173"
+  done
+  [[ "$LANES_HOOK_UP$LANES_HOOK_INDEX" =~ ^[01][01]$ ]] || die "LANES_HOOK_UP and LANES_HOOK_INDEX are 0 or 1"
+}
+
+default_branch() {  # origin's HEAD, else whichever of main/master origin has
+  local b
+  if b="$(git -C "$MAIN" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)"; then echo "${b#origin/}"; return; fi
+  for b in main master; do git -C "$MAIN" show-ref -q --verify "refs/remotes/origin/$b" && { echo "$b"; return; }; done
+  echo main
+}
+
 # The checkout you're in wins, so a branch that changes .lanes.conf works
 # before it is merged; otherwise the main checkout's.
 _conf="$(git rev-parse --show-toplevel 2>/dev/null)/.lanes.conf"
 [ -f "$_conf" ] || _conf="$MAIN/.lanes.conf"
-# shellcheck disable=SC1090
-[ -f "$_conf" ] && . "$_conf"
+[ -f "$_conf" ] && read_conf "$_conf"
+case "$LANES_ROOT" in /*) ;; *) LANES_ROOT="$MAIN/$LANES_ROOT";; esac
+[ -n "$LANES_DEFAULT_BRANCH" ] || LANES_DEFAULT_BRANCH="$(default_branch)"
+[ -n "$LANES_BASE" ] || LANES_BASE="origin/$LANES_DEFAULT_BRANCH"
+check_settings
 # ─────────────────────────────────────────────────────────────────────
 
-slug_of() { echo "$1" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_\n-' '-'; }
 here() { git rev-parse --show-toplevel; }
 env_get() { sed -n "s/^$2=//p" "$1/$LANES_ENV_FILE" 2>/dev/null | tail -1; }
 port_names() { local p; for p in $LANES_PORTS; do echo "${p%%=*}"; done; }
@@ -199,20 +243,19 @@ seed_db() {  # seed_db <dir> <auto|clone|empty|none>
 }
 
 # ── GitNexus (optional): one index per lane ──────────────────────────
-gitnexus_bin() {
+gitnexus_bin() {  # sets GX to the command (an array: the path may hold spaces)
   [ "$LANES_GITNEXUS" = off ] && return 1
-  if [ -f "$MAIN/.gitnexus/run.cjs" ] && command -v node >/dev/null; then echo "node $MAIN/.gitnexus/run.cjs"
-  elif command -v gitnexus >/dev/null; then echo gitnexus
+  if [ -f "$MAIN/.gitnexus/run.cjs" ] && command -v node >/dev/null; then GX=(node "$MAIN/.gitnexus/run.cjs")
+  elif command -v gitnexus >/dev/null; then GX=(gitnexus)
   else return 1; fi
 }
 
 index_dir() {
-  local gx name
-  gx="$(gitnexus_bin)" || return 0
+  local name
+  gitnexus_bin || return 0
   name="$LANES_NAME-$(basename "$1")"; [ "$1" = "$MAIN" ] && name="$LANES_NAME"
   log "GitNexus: indexing $(basename "$1") as '$name'..."
-  # shellcheck disable=SC2086
-  ( cd "$1" && $gx analyze --index-only --name "$name" . >/dev/null 2>&1 ) \
+  ( cd "$1" && "${GX[@]}" analyze --index-only --name "$name" . >/dev/null 2>&1 ) \
     && log "GitNexus: index up to date" || log "WARNING: GitNexus analyze failed — run lanes index"
 }
 
@@ -285,7 +328,7 @@ cmd_new() {
   log "worktree $dir on $branch (from $from)"
   adopt_dir "$dir" "$index" "$up" "$db"
   echo ""
-  echo "  cd $dir    # start your agent session here"
+  printf '  cd %q    # start your agent session here\n' "$dir"
 }
 
 # Give a worktree that already exists (made by lanes, Claude Code, Worktrunk,
@@ -325,12 +368,12 @@ cmd_adopt() {
 # Stop a lane's runtime without touching the worktree (for tools that remove
 # the worktree themselves, e.g. a Worktrunk pre-remove hook).
 release_dir() {
-  local dir="$1" gx
+  local dir="$1"
   if has_stack "$dir" && [ -n "$(project_of "$dir")" ]; then
     log "stopping $(project_of "$dir"), dropping its volumes and images..."
     compose "$dir" down -v --rmi local --remove-orphans >/dev/null 2>&1 || true
   fi
-  if gx="$(gitnexus_bin)"; then $gx remove --force "$LANES_NAME-$(basename "$dir")" >/dev/null 2>&1 || true; fi
+  if gitnexus_bin; then "${GX[@]}" remove --force "$LANES_NAME-$(basename "$dir")" >/dev/null 2>&1 || true; fi
   # Containers often write root-owned files into bind mounts; hand them back.
   command -v docker >/dev/null && docker run --rm -v "$dir:/w" alpine:3.20 chown -R "$(id -u):$(id -g)" /w >/dev/null 2>&1 || true
 }
@@ -388,13 +431,22 @@ cmd_down() { local dir; dir="$(require_lane)"; has_stack "$dir" && compose "$dir
 cmd_url() { local dir; dir="$(require_lane)"; [ -n "$LANES_URL" ] || die "set LANES_URL in .lanes.conf"; expand "$LANES_URL" "$dir"; }
 cmd_index() { index_dir "$(here)"; }
 
+# One line per worktree, main checkout first: "<path>\t<branch>" (branch empty
+# when detached). Tab-separated, so paths with spaces survive.
+worktree_rows() {
+  git -C "$MAIN" worktree list --porcelain | awk '
+    /^worktree /{p = substr($0, 10)}
+    /^branch /{b = substr($0, 8); sub(/^refs\/heads\//, "", b); print p "\t" b}
+    /^detached/{print p "\t"}'
+}
+
 cmd_ls() {
-  quiet_git -C "$MAIN" fetch -q origin 2>/dev/null || true
+  [ "${1:-}" = --no-fetch ] || quiet_git -C "$MAIN" fetch -q origin 2>/dev/null || true
   local first_port; first_port="$(port_names | head -1)"
   printf '%-48s %-36s %-6s %-8s %-9s %s\n' LANE BRANCH PORT STACK "+/-BASE" DIRTY
-  git -C "$MAIN" worktree list --porcelain | awk '/^worktree /{p=$2} /^branch /{sub("refs/heads/","",$2); print p" "$2} /^detached/{print p" (detached)"}' |
-  while read -r path branch; do
+  worktree_rows | while IFS=$'\t' read -r path branch; do
     local port="-" stack="-" ab dirty
+    branch="${branch:-(detached)}"
     if [ "$path" = "$MAIN" ]; then
       [ -n "$first_port" ] && port="$(echo "$LANES_PORTS" | tr ' ' '\n' | sed -n "s/^$first_port=//p")"
       has_stack "$MAIN" && { main_compose ps --status running -q 2>/dev/null | grep -q . && stack=running || stack=stopped; }
@@ -410,15 +462,19 @@ cmd_ls() {
 
 changed_files() { git -C "$MAIN" diff --name-only "$LANES_BASE...$1" 2>/dev/null; }
 
+# Default: every open branch, local lanes and origin. --lanes: only the
+# branches checked out in lanes, which is local and fast (the session hook).
 cmd_overlap() {
-  local me="${1:-$(git branch --show-current)}"
+  local only_lanes=0 me=""
+  while [ $# -gt 0 ]; do case "$1" in --lanes) only_lanes=1; shift;; *) me="$1"; shift;; esac; done
+  [ -n "$me" ] || me="$(git branch --show-current)"
   [ -n "$me" ] && [ "$me" != "$LANES_DEFAULT_BRANCH" ] || die "overlap: run it on a feature branch (or give one)"
   local mine others other ref common found=0
   mine="$( { changed_files "$me"; git -C "$(here)" diff --name-only HEAD 2>/dev/null || true; } | sort -u | sed '/^$/d')"
   [ -n "$mine" ] || { log "$me changes nothing yet relative to $LANES_BASE"; return 0; }
-  others="$( { git -C "$MAIN" worktree list --porcelain | sed -n 's#^branch refs/heads/##p'
-               git -C "$MAIN" for-each-ref --format='%(refname:short)' refs/remotes/origin | sed 's#^origin/##'
-             } | grep -vxE "$LANES_DEFAULT_BRANCH|HEAD|origin|$me" | sort -u)"
+  others="$( { worktree_rows | cut -f2
+               [ "$only_lanes" = 1 ] || git -C "$MAIN" for-each-ref --format='%(refname:short)' refs/remotes/origin | sed 's#^origin/##'
+             } | grep -vxF -e "" -e "$LANES_DEFAULT_BRANCH" -e HEAD -e origin -e "$me" | sort -u)"
   for other in $others; do
     ref="$other"; git -C "$MAIN" show-ref -q --verify "refs/heads/$other" || ref="origin/$other"
     common="$(comm -12 <(echo "$mine") <(changed_files "$ref" | sort -u))"
@@ -459,10 +515,15 @@ cmd_status() {
   fi
   index_status "$top"
   echo ""
-  cmd_ls 2>/dev/null || true
+  # Runs at every session start: local refs only, no fetch. The drafts call
+  # is the one network step, and it has its own timeout.
+  cmd_ls --no-fetch 2>/dev/null || true
   drafts="$(open_drafts)"
   [ -n "$drafts" ] && { echo ""; echo "Open drafts (claims):"; echo "$drafts" | sed 's/^/  /'; }
-  if [ -n "$branch" ] && [ "$branch" != "$LANES_DEFAULT_BRANCH" ]; then echo ""; cmd_overlap "$branch" 2>/dev/null || true; fi
+  if [ -n "$branch" ] && [ "$branch" != "$LANES_DEFAULT_BRANCH" ]; then
+    echo ""; cmd_overlap --lanes "$branch" 2>/dev/null || true
+    echo "(overlap with other lanes; run lanes overlap for every open branch on origin)"
+  fi
 }
 
 cmd_rm() {
@@ -471,8 +532,14 @@ cmd_rm() {
   [ -n "$name" ] || die "usage: lanes rm <name|path> [--force]"
   dir="$name"; [ -d "$dir" ] || dir="$LANES_ROOT/$(slug_of "$name")"
   [ -d "$dir" ] || die "no lane $name"
-  dir="$(cd "$dir" && pwd)"
+  # Only the top of a worktree of this repo: never a subfolder (`lanes rm docs`
+  # inside a lane) nor a folder of another repo.
+  local top
+  top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || die "$name is not in a git worktree"
+  [ "$(cd "$dir" && pwd -P)" = "$(cd "$top" && pwd -P)" ] || die "$name is a folder inside $top, not a lane"
+  dir="$top"
   [ "$dir" != "$MAIN" ] || die "refusing to remove the main checkout"
+  worktrees | grep -qxF "$dir" || die "$dir is not a worktree of $REPO (lanes ls)"
   branch="$(git -C "$dir" branch --show-current)"
   if [ "$force" = 0 ]; then
     [ -z "$(git -C "$dir" status --porcelain -- . ":(exclude)$LANES_ENV_FILE")" ] || die "$dir has uncommitted changes (--force to drop them)"
@@ -481,7 +548,9 @@ cmd_rm() {
     [ "$unpushed" = 0 ] || die "$branch has $unpushed commit(s) not on the remote (push, or --force)"
   fi
   release_dir "$dir"
-  local flags=(); [ "$force" = 1 ] && flags=(--force --force)
+  # lanes checked for changes itself (its own env file aside); one --force lets
+  # git drop that untracked env file. --force twice also removes a locked worktree.
+  local flags=(--force); [ "$force" = 1 ] && flags=(--force --force)
   git -C "$MAIN" worktree remove "${flags[@]}" "$dir"
   if [ -n "$branch" ] && { [ "${LANES_DROP_BRANCH:-0}" = 1 ] || git -C "$MAIN" merge-base --is-ancestor "$branch" "$LANES_BASE" 2>/dev/null; }; then
     git -C "$MAIN" branch -D "$branch" >/dev/null && log "deleted local branch $branch (merged)"
@@ -546,7 +615,7 @@ cmd_prune() {
   [ "${1:-}" = --yes ] && yes=1
   quiet_git -C "$MAIN" fetch -q --prune origin || log "WARNING: git fetch failed — verdicts use local refs"
   git -C "$MAIN" worktree prune
-  while read -r path branch; do
+  while IFS=$'\t' read -r path branch; do
     [ "$path" = "$MAIN" ] && continue
     verdict="$(prune_verdict "$path" "$branch")"
     printf '%-6s %-48s %s\n' "${verdict%% *}" "${path/#$HOME/\~}" "(${branch:-detached}) ${verdict#* }"
@@ -554,7 +623,7 @@ cmd_prune() {
       n=$((n + 1))
       if [ "$yes" = 1 ]; then LANES_DROP_BRANCH=1 cmd_rm "$path" --force; fi
     fi
-  done < <(git -C "$MAIN" worktree list --porcelain | awk '/^worktree /{p=$2} /^branch /{sub("refs/heads/","",$2); print p" "$2} /^detached/{print p" "}')
+  done < <(worktree_rows)
   # Compose stacks of lanes whose worktree is gone. `down -v` drops a database,
   # so only a stack lanes started itself (compose file under LANES_ROOT) that no
   # worktree claims — never another project with a similar name, nor a stack
@@ -626,30 +695,34 @@ plugin_enabled() {  # plugin_enabled <repo top>: lanes plugin on for the user or
 cmd_doctor() {
   local ok=1 f top
   top="$(here)"
+  # The tests name variables, never paste their values in: eval of a path or a
+  # setting from .lanes.conf must not run it.
   check() { if eval "$2"; then echo "  ok    $1"; else echo "  FIX   $1${3:+ — $3}"; ok=0; fi; }
   echo "lanes doctor — $top"
-  check "git worktree available" "git worktree list >/dev/null 2>&1"
-  check ".lanes.conf present" "[ -f '$_conf' ]" "copy templates/lanes.conf; defaults apply until then"
+  check "git worktree available" 'git worktree list >/dev/null 2>&1'
+  check ".lanes.conf present" '[ -f "$_conf" ]' "copy templates/lanes.conf; defaults apply until then"
+  check "default branch $LANES_DEFAULT_BRANCH ($LANES_BASE) exists" 'git -C "$MAIN" rev-parse -q --verify "$LANES_BASE" >/dev/null' \
+    "set LANES_DEFAULT_BRANCH in .lanes.conf, or: git remote set-head origin --auto"
   if [ -n "$LANES_COMPOSE_FILE" ] && [ -f "$top/$LANES_COMPOSE_FILE" ]; then
     f="$top/$LANES_COMPOSE_FILE"
-    check "docker compose v2" "docker compose version >/dev/null 2>&1"
-    check "no container_name in $LANES_COMPOSE_FILE" "! grep -qE '^\s*container_name:' '$f'" \
+    check "docker compose v2" 'docker compose version >/dev/null 2>&1'
+    check "no container_name in $LANES_COMPOSE_FILE" '! grep -qE "^\s*container_name:" "$f"' \
       "fixed names let only one stack run; remove them (compose names containers <project>-<service>-1)"
-    check "host ports come from env vars" "! grep -qE \"^\s*-\s*['\\\"]?[0-9]+:[0-9]+\" '$f'" \
+    check "host ports come from env vars" "! grep -qE \"^\\s*-\\s*['\\\"]?[0-9]+:[0-9]+\" \"\$f\"" \
       "write ports as \${FRONTEND_PORT:-5173}:5173 and list them in LANES_PORTS"
-    check "LANES_PORTS set" "[ -n '$LANES_PORTS' ]" "e.g. LANES_PORTS=\"FRONTEND_PORT=5173 BACKEND_PORT=3000\""
-    check "$LANES_ENV_FILE in the main checkout" "[ -f '$MAIN/$LANES_ENV_FILE' ]" "lanes copies it into every lane"
-    check "$LANES_ENV_FILE is gitignored" "git -C '$MAIN' check-ignore -q '$LANES_ENV_FILE'"
+    check "LANES_PORTS set" '[ -n "$LANES_PORTS" ]' "e.g. LANES_PORTS=\"FRONTEND_PORT=5173 BACKEND_PORT=3000\""
+    check "$LANES_ENV_FILE in the main checkout" '[ -f "$MAIN/$LANES_ENV_FILE" ]' "lanes copies it into every lane"
+    check "$LANES_ENV_FILE is gitignored" 'git -C "$MAIN" check-ignore -q "$LANES_ENV_FILE"'
   else
     echo "  --    no compose file: lanes without dev stacks"
   fi
   case "$(forge)" in
-    github) check "gh CLI (draft PRs)" "command -v gh >/dev/null";;
-    gitlab) check "glab CLI (listing drafts)" "command -v glab >/dev/null" "optional: claim works through push options";;
+    github) check "gh CLI (draft PRs)" 'command -v gh >/dev/null';;
+    gitlab) check "glab CLI (listing drafts)" 'command -v glab >/dev/null' "optional: claim works through push options";;
   esac
-  gitnexus_bin >/dev/null && echo "  ok    GitNexus found: one index per lane" || echo "  --    GitNexus not found (optional)"
+  gitnexus_bin && echo "  ok    GitNexus found: one index per lane" || echo "  --    GitNexus not found (optional)"
   check "SessionStart briefing (lanes plugin, or a hook in .claude/settings.json)" \
-    "plugin_enabled '$top' || grep -qs 'lanes status' '$top/.claude/settings.json'" \
+    'plugin_enabled "$top" || grep -qs "lanes status" "$top/.claude/settings.json"' \
     "claude plugin install lanes@xudo-lanes, or copy templates/settings.json"
   [ "$ok" = 1 ] && echo "Ready." || echo "Fix the items above, then: lanes new feat/try-it"
 }

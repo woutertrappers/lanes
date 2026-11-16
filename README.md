@@ -102,7 +102,9 @@ git post-merge                    # pull main, prune merged lanes and branches, 
 
 ## Configuration
 
-One file, `.lanes.conf` at the repo root, all optional:
+One file, `.lanes.conf` at the repo root, all optional. It is data, not a script: lanes reads
+the `KEY="value"` lines as text and never runs them, so a repo you just cloned can't run code
+through it at session start. The default branch comes from `origin/HEAD`.
 
 ```bash
 LANES_PORTS="FRONTEND_PORT=5173 BACKEND_PORT=3000"   # lane n gets 5174/3001, 5175/3002, …
