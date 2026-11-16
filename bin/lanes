@@ -590,6 +590,16 @@ branch_start() {  # branch_start <branch> <tip>
 }
 
 # Why a lane can go, or why it stays. Prints "prune <reason>" or "keep <reason>".
+# Every commit of <rev> since the base has a twin with the same patch in the
+# base: merged after a rebase (GitLab "rebase" button, cherry-pick), where the
+# hashes differ. A commit changed during the rebase (conflict) has no twin and
+# keeps the lane — the safe side.
+all_upstream() {  # all_upstream <rev>
+  local out
+  out="$(git -C "$MAIN" cherry "$LANES_BASE" "$1" 2>/dev/null)" || return 1
+  [ -n "$out" ] && ! printf '%s\n' "$out" | grep -q '^+'
+}
+
 prune_verdict() {  # prune_verdict <dir> <branch>
   local dir="$1" b="$2" head h
   [ -n "$b" ] || { echo "keep detached HEAD"; return; }
@@ -598,6 +608,9 @@ prune_verdict() {  # prune_verdict <dir> <branch>
   if [ "$head" = "$(branch_start "$b" "$head")" ]; then echo "keep no commits of its own yet"; return; fi
   if git -C "$MAIN" merge-base --is-ancestor "$head" "$LANES_BASE" 2>/dev/null; then
     echo "prune merged into $LANES_BASE"; return
+  fi
+  if all_upstream "$head"; then
+    echo "prune merged into $LANES_BASE after a rebase (same patches)"; return
   fi
   for h in $(merged_heads "$b"); do
     if [ "$h" = "$head" ] || git -C "$MAIN" merge-base --is-ancestor "$head" "$h" 2>/dev/null; then
@@ -676,6 +689,9 @@ cmd_sync() {
     [ "$tip" = "$(branch_start "$b" "$tip")" ] && continue
     if git -C "$MAIN" merge-base --is-ancestor "$b" "$LANES_BASE"; then
       git -C "$MAIN" branch -q -D "$b" && log "deleted branch $b (in $LANES_BASE)"; continue
+    fi
+    if all_upstream "$b"; then
+      git -C "$MAIN" branch -q -D "$b" && log "deleted branch $b (same patches in $LANES_BASE, rebased merge)"; continue
     fi
     for h in $(merged_heads "$b"); do
       if [ "$h" = "$tip" ]; then git -C "$MAIN" branch -q -D "$b" && log "deleted branch $b (squash-merged)"; continue 2; fi
