@@ -68,7 +68,7 @@ Daily use:
 lanes new feat/invoice-export     # ../myapp-lanes/feat-invoice-export, stack up, DB cloned
 cd ../myapp-lanes/feat-invoice-export && claude
 lanes claim                       # after the first commit: draft PR = "I'm on this"
-lanes ls                          # all lanes: branch, port, stack, ahead/behind, dirty
+lanes ls                          # all lanes: branch, port, stack, ahead/behind, dirty, activity
 lanes overlap                     # who else touches the files you touch
 lanes rm feat-invoice-export      # merged? stack, volumes, images, index and folder gone
 lanes prune                       # or clean up every merged lane at once (dry run; --yes to do it)
@@ -86,13 +86,13 @@ git post-merge                    # pull main, prune merged lanes and branches, 
 | Command | What it does |
 |---|---|
 | `lanes new <type>/<slug>` | worktree from `origin/main`, compose project `<repo>-<slug>`, ports base+n, DB seeded, code index built |
-| `lanes ls` | every lane with branch, port, stack state, ahead/behind, uncommitted files |
+| `lanes ls` | every lane with branch, port, stack state, ahead/behind, uncommitted files and last activity (newest uncommitted file or HEAD move); warns when the main checkout is behind or has uncommitted files |
 | `lanes overlap [branch]` | files shared with other open branches, local and remote |
 | `lanes claim [--empty]` | push + draft PR (GitHub, `gh`) or draft MR (GitLab push options) |
 | `lanes status` | the overview the session hook prints |
 | `lanes index` | rebuild this checkout's GitNexus index |
 | `lanes up` / `down` / `url` | stack control inside a lane |
-| `lanes rm <name> [--force]` | removes everything; refuses uncommitted or unpushed work |
+| `lanes rm <name> [--force]` | removes everything; refuses uncommitted or unpushed work; fetches first, so a just-merged branch is deleted too |
 | `lanes sync` | in the main checkout after merges: switch to `main` if the current branch is merged, `pull --ff-only`, `prune --yes`, delete merged local branches (squash merges confirmed with the forge), refresh the index |
 | `lanes prune [--yes]` | after merges: removes every lane whose work is merged, squash merges included (asks the forge); dry run without `--yes` |
 | `lanes doctor` | readiness check: compose file, ports, env file, CLIs, hook |

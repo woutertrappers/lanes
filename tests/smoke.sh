@@ -126,6 +126,62 @@ check "refuses a folder of another repo" '! "$LANES" rm "$T/plain" --force >/dev
 "$LANES" rm "$T/shop-lanes/feat-c" >/dev/null 2>&1 || true
 check "removes a clean lane by its path, without --force" '[ ! -d "$T/shop-lanes/feat-c" ]'
 
+echo "ls: dirty, activity and the main checkout"
+# A repo of its own, without .lanes.conf and with an env file nothing ignores.
+git init -q --bare -b main "$T/web.git"
+git clone -q "$T/web.git" "$T/web" 2>/dev/null
+cd "$T/web"
+echo a > a.txt && git add a.txt && git commit -q -m init && git push -q origin main
+LANES_ROW="web-lanes/feat-x "
+row() { "$LANES" ls --no-fetch | grep -F "$LANES_ROW"; }
+col() { row | awk -v n="$1" '{print $(NF - n)}'; }          # from the right: paths have spaces
+dirty() { col 1; }
+active() { col 0; }
+"$LANES" new feat/x --no-up --no-index >/dev/null 2>&1
+X="$T/web-lanes/feat-x"
+check "the env file lanes wrote does not count as dirty" '[ "$(dirty)" = 0 ]'
+check "a fresh lane is active" '[ "$(active)" = "<1m" ]'
+out="$("$LANES" ls --no-fetch)"
+check "no warning for a clean, current main checkout" '! has "$out" WARNING'
+# Age the lane: HEAD moved long ago, then a file changed two hours ago.
+reflog="$(git -C "$X" rev-parse --absolute-git-dir)/logs/HEAD"
+sed 's/> [0-9]* /> 1000000000 /' "$reflog" > "$T/reflog" && cp "$T/reflog" "$reflog"
+ago() { date -d "$1 ago" +%Y%m%d%H%M 2>/dev/null || date -v-"$2" +%Y%m%d%H%M; }
+check "an untouched clean lane shows the age of its last HEAD move" '[[ "$(active)" =~ ^[0-9]{4,}d$ ]]'
+mkdir "$X/new dir" && echo n > "$X/new dir/n.txt" && touch -t "$(ago '2 hours' 2H)" "$X/new dir/n.txt"
+check "an uncommitted file sets the activity" '[ "$(active)" = 2h ]'
+check "…and counts as dirty" '[ "$(dirty)" = 1 ]'
+echo b >> "$X/a.txt"
+check "the newest uncommitted file wins" '[ "$(active)" = "<1m" ]'
+rm "$X/new dir/n.txt" && git -C "$X" checkout -q a.txt && rm "$X/a.txt"
+check "a deleted file counts as activity" '[ "$(active)" = "<1m" ]'
+git -C "$X" checkout -q a.txt && git -C "$X" mv a.txt "renamed file.txt"
+check "a staged rename is read as one change" '[ "$(dirty)" = 1 ] && [ "$(active)" = "<1m" ]'
+git -C "$X" mv "renamed file.txt" a.txt
+
+echo n > "$T/web/note.txt"
+out="$("$LANES" ls --no-fetch)"
+check "warns about uncommitted files in the main checkout" 'has "$out" "1 uncommitted file(s) in the main checkout"'
+rm "$T/web/note.txt"
+git clone -q "$T/web.git" "$T/web2" 2>/dev/null
+git -C "$T/web2" commit -q --allow-empty -m elsewhere && git -C "$T/web2" push -q origin main
+out="$("$LANES" ls)"
+check "warns when the main checkout is behind" 'has "$out" "1 commit(s) behind origin/main — there: git pull --ff-only"'
+out="$(cd "$X" && "$LANES" status 2>/dev/null)" || true
+check "status shows the warning inside a lane too" 'has "$out" "behind origin/main"'
+git commit -q --allow-empty -m local
+out="$("$LANES" ls --no-fetch)"
+check "warns that a push will be rejected when diverged" 'has "$out" "1 ahead: a push will be rejected"'
+git reset -q --hard origin/main
+
+# Merged elsewhere a moment ago: rm has to see it without anyone fetching.
+git -C "$X" commit -q --allow-empty -m feature && git -C "$X" push -q origin feat/x 2>/dev/null
+git -C "$T/web2" fetch -q origin && git -C "$T/web2" merge -q --no-ff -m merge origin/feat/x && git -C "$T/web2" push -q origin main
+out="$("$LANES" rm feat-x 2>&1)" || true
+check "rm fetches, so it deletes a branch merged a moment ago" 'has "$out" "deleted local branch feat/x"'
+check "rm points at a main checkout that is behind" 'has "$out" "behind origin/main"'
+cd "$T/shop"
+
 echo "default branch"
 git init -q --bare -b master "$T/legacy.git"
 git clone -q "$T/legacy.git" "$T/legacy" 2>/dev/null
