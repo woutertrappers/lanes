@@ -91,6 +91,9 @@ check_settings() {
     [[ "$p" =~ ^[A-Za-z_][A-Za-z0-9_]*=[0-9]+$ ]] || die "LANES_PORTS entry '$p': write NAME=port, e.g. FRONTEND_PORT=5173"
   done
   [[ "$LANES_HOOK_UP$LANES_HOOK_INDEX" =~ ^[01][01]$ ]] || die "LANES_HOOK_UP and LANES_HOOK_INDEX are 0 or 1"
+  # Both end up as git arguments, where a leading - is read as an option.
+  case "$LANES_DEFAULT_BRANCH" in -*) die "LANES_DEFAULT_BRANCH can't start with -";; esac
+  case "$LANES_BASE" in -*) die "LANES_BASE can't start with -";; esac
 }
 
 default_branch() {  # origin's HEAD, else whichever of main/master origin has
@@ -115,7 +118,20 @@ here() { git rev-parse --show-toplevel; }
 env_get() { sed -n "s/^$2=//p" "$1/$LANES_ENV_FILE" 2>/dev/null | tail -1; }
 port_names() { local p; for p in $LANES_PORTS; do echo "${p%%=*}"; done; }
 has_stack() { [ -n "$LANES_COMPOSE_FILE" ] && [ -f "$1/$LANES_COMPOSE_FILE" ]; }
-quiet_git() { GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=5" git "$@"; }
+no_prompt() { GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=5" "$@"; }
+quiet_git() { no_prompt git "$@"; }
+
+# Refresh the refs rm judges by: origin, plus the remote of a LANES_BASE that
+# lives on another one. A remote that stops answering must not hang rm (or the
+# WorktreeRemove hook): 10 s per fetch, where timeout(1) exists.
+fetch_base() {
+  local limit=() other="${LANES_BASE%%/*}" r
+  command -v timeout >/dev/null && limit=(timeout 10)
+  { [ "$other" != origin ] && git -C "$MAIN" config "remote.$other.url" >/dev/null; } || other=""
+  for r in origin $other; do
+    no_prompt ${limit[@]+"${limit[@]}"} git -C "$MAIN" fetch -q "$r" >/dev/null 2>&1 || return 1
+  done
+}
 
 require_lane() {
   local top; top="$(here)"
@@ -442,60 +458,78 @@ worktree_rows() {
 
 # Uncommitted files of a checkout, as `git status --porcelain [flags]`. In a
 # lane the env file lanes wrote itself doesn't count; in the main checkout that
-# file is yours, so it does. --no-optional-locks: looking at another session's
-# checkout must not take its index lock.
+# file is yours, so it does, but lanes kept inside it don't.
+# --no-optional-locks: looking at another session's checkout must not take its
+# index lock. Fails when git status does: that is not the same as clean.
 dirty_status() {  # dirty_status <dir> [flags...]
   local dir="$1" spec=(.); shift
-  [ "$dir" = "$MAIN" ] || spec+=(":(exclude)$LANES_ENV_FILE")
+  if [ "$dir" = "$MAIN" ]; then
+    case "$LANES_ROOT" in "$MAIN"/*) spec+=(":(exclude)${LANES_ROOT#"$MAIN"/}");; esac
+  else
+    # git refuses a path outside the checkout, and there is nothing to exclude.
+    case "$LANES_ENV_FILE" in /*|../*|*/../*) ;; *) spec+=(":(exclude)$LANES_ENV_FILE");; esac
+  fi
   git --no-optional-locks -C "$dir" status --porcelain "$@" -- "${spec[@]}"
 }
 
 # When something last happened in a checkout, in epoch seconds: the newest of
 # its uncommitted files and its last HEAD move (new lane, commit, switch, merge,
-# rebase). A hint that someone is at work there, not proof either way: reading
-# or running tests leaves no trace.
+# rebase). A hint that someone is at work there, not proof either way: reading,
+# running tests or editing inside a submodule leaves no trace.
+# Looks at 2000 files at most, so a large unignored folder can't stall the
+# session hook; then prints "cut" after the time: there may be newer ones.
 last_activity() {  # last_activity <dir>
-  local dir="$1" entry file newest="" head="" t=""
+  local dir="$1" entry old file paths n=0 cut="" newest="" head="" t=""
   while IFS= read -r -d '' entry; do
-    # A rename or copy is followed by the old path: skip that.
-    case "${entry:0:2}" in *R*|*C*) IFS= read -r -d '' _ || true;; esac
-    file="$dir/${entry:3}"
-    # Deleted: the folder it was in changed.
-    while [ ! -e "$file" ] && [ "$file" != "$dir" ]; do file="${file%/*}"; done
-    # -nt is a shell builtin: no process per file, and the same on Linux and macOS.
-    if [ -z "$newest" ] || [ "$file" -nt "$newest" ]; then newest="$file"; fi
+    n=$((n + 1))
+    if [ "$n" -gt 2000 ]; then cut="cut"; break; fi
+    paths=("${entry:3}")
+    # A rename or copy is followed by the old path.
+    case "${entry:0:2}" in *R*|*C*) IFS= read -r -d '' old || old=""; paths+=("$old");; esac
+    for file in "${paths[@]}"; do
+      file="$dir/$file"
+      # Deleted or moved away: the folder it was in changed (also catches a
+      # rename that kept the file's time).
+      while [ ! -e "$file" ] && [ "$file" != "$dir" ]; do file="${file%/*}"; done
+      # -nt is a shell builtin: no process per file, the same on Linux and macOS.
+      if [ -z "$newest" ] || [ "$file" -nt "$newest" ]; then newest="$file"; fi
+    done
   done < <(dirty_status "$dir" -z --untracked-files=all 2>/dev/null)
   [ -z "$newest" ] || t="$(date -r "$newest" +%s 2>/dev/null || true)"
   head="$(git -C "$dir" log -g -1 --date=unix --format=%gd HEAD 2>/dev/null | sed -n 's/.*@{\([0-9]*\)}$/\1/p' || true)"
   if [ "${head:-0}" -gt "${t:-0}" ]; then t="$head"; fi
-  echo "$t"
+  echo "$t $cut"
 }
 
-age() {  # age <epoch seconds, may be empty>
+age() {  # age <epoch seconds, may be empty> [cut: it may be more recent]
   [ -n "$1" ] || { echo "-"; return; }
-  local s=$(( $(date +%s) - $1 ))
+  local s=$(( $(date +%s) - $1 )) most="${2:+<=}"
   if [ "$s" -lt 60 ]; then echo "<1m"
-  elif [ "$s" -lt 3600 ]; then echo "$((s / 60))m"
-  elif [ "$s" -lt 86400 ]; then echo "$((s / 3600))h"
-  else echo "$((s / 86400))d"; fi
+  elif [ "$s" -lt 3600 ]; then echo "$most$((s / 60))m"
+  elif [ "$s" -lt 86400 ]; then echo "$most$((s / 3600))h"
+  else echo "$most$((s / 86400))d"; fi
 }
 
-# Every session shares the main checkout: say so when it lags behind the base
-# or holds uncommitted work. Compares with the refs of the last fetch.
+# Every session shares the main checkout: say so when its default branch lags
+# behind origin's (not LANES_BASE: that is where lanes start) or it holds
+# uncommitted work. Compares with the refs of the last fetch. An agent may run
+# what is printed here, so only suggest what can't remove or rewrite work.
 main_warnings() {
-  local ahead=0 behind=0 dirty
+  # A bare main repository has no checkout to warn about.
+  [ "$(git -C "$MAIN" rev-parse --is-inside-work-tree 2>/dev/null)" = true ] || return 0
+  local ahead=0 behind=0 dirty upstream="origin/$LANES_DEFAULT_BRANCH"
   if [ "$(git -C "$MAIN" branch --show-current)" = "$LANES_DEFAULT_BRANCH" ]; then
-    read -r ahead behind < <(git -C "$MAIN" rev-list --left-right --count "HEAD...$LANES_BASE" 2>/dev/null) || true
+    read -r ahead behind < <(git -C "$MAIN" rev-list --left-right --count "HEAD...$upstream" 2>/dev/null) || true
   fi
   if [ "${behind:-0}" -gt 0 ]; then
     if [ "$ahead" = 0 ]; then
-      echo "WARNING: the main checkout is $behind commit(s) behind $LANES_BASE — there: git pull --ff-only (or lanes sync, which also removes merged lanes)"
+      echo "WARNING: the main checkout is $behind commit(s) behind $upstream — there: git pull --ff-only origin $LANES_DEFAULT_BRANCH"
     else
-      echo "WARNING: the main checkout is $behind commit(s) behind $LANES_BASE and $ahead ahead: a push will be rejected — there: git pull --rebase=merges"
+      echo "WARNING: the main checkout is $behind commit(s) behind $upstream and $ahead ahead: a push will be rejected — ask the integrator before combining them (usually, with a clean checkout: git pull --rebase origin $LANES_DEFAULT_BRANCH)"
     fi
   fi
   dirty="$(dirty_status "$MAIN" 2>/dev/null | wc -l)"
-  if [ "$dirty" -gt 0 ]; then echo "WARNING: $dirty uncommitted file(s) in the main checkout, which every session shares"; fi
+  if [ "$dirty" -gt 0 ]; then echo "WARNING: $dirty uncommitted change(s) in the main checkout, which every session shares"; fi
 }
 
 cmd_ls() {
@@ -503,7 +537,7 @@ cmd_ls() {
   local first_port; first_port="$(port_names | head -1)"
   printf '%-48s %-36s %-6s %-8s %-9s %-6s %s\n' LANE BRANCH PORT STACK "+/-BASE" DIRTY ACTIVE
   worktree_rows | while IFS=$'\t' read -r path branch; do
-    local port="-" stack="-" ab dirty active
+    local port="-" stack="-" ab dirty when="" cut=""
     branch="${branch:-(detached)}"
     if [ "$path" = "$MAIN" ]; then
       [ -n "$first_port" ] && port="$(echo "$LANES_PORTS" | tr ' ' '\n' | sed -n "s/^$first_port=//p")"
@@ -514,8 +548,8 @@ cmd_ls() {
     fi
     ab="$(git -C "$path" rev-list --left-right --count "HEAD...$LANES_BASE" 2>/dev/null | awk '{print "+"$1"/-"$2}')"
     dirty="$(dirty_status "$path" 2>/dev/null | wc -l)"
-    active="$(age "$(last_activity "$path")")"
-    printf '%-48s %-36s %-6s %-8s %-9s %-6s %s\n' "${path/#$HOME/\~}" "$branch" "${port:--}" "$stack" "${ab:--}" "$dirty" "$active"
+    read -r when cut < <(last_activity "$path") || true
+    printf '%-48s %-36s %-6s %-8s %-9s %-6s %s\n' "${path/#$HOME/\~}" "$branch" "${port:--}" "$stack" "${ab:--}" "$dirty" "$(age "$when" "$cut")"
   done
   main_warnings
 }
@@ -603,9 +637,11 @@ cmd_rm() {
   branch="$(git -C "$dir" branch --show-current)"
   # The branch may have been merged a moment ago: fetch before judging it.
   # (prune, which sets LANES_DROP_BRANCH, has fetched and decided already.)
-  [ "${LANES_DROP_BRANCH:-0}" = 1 ] || quiet_git -C "$MAIN" fetch -q origin "$LANES_DEFAULT_BRANCH" 2>/dev/null || true
+  [ "${LANES_DROP_BRANCH:-0}" = 1 ] || fetch_base || log "WARNING: git fetch failed — judging by local refs"
   if [ "$force" = 0 ]; then
-    [ -z "$(dirty_status "$dir")" ] || die "$dir has uncommitted changes (--force to drop them)"
+    local changes
+    changes="$(dirty_status "$dir")" || die "git status fails in $dir (--force to remove it anyway)"
+    [ -z "$changes" ] || die "$dir has uncommitted changes (--force to drop them)"
     if git -C "$dir" rev-parse -q --verify '@{u}' >/dev/null; then unpushed="$(git -C "$dir" log --oneline '@{u}..' | wc -l)"
     else unpushed="$(git -C "$dir" log --oneline "$LANES_BASE.." | wc -l)"; fi
     [ "$unpushed" = 0 ] || die "$branch has $unpushed commit(s) not on the remote (push, or --force)"
@@ -619,7 +655,7 @@ cmd_rm() {
     git -C "$MAIN" branch -D "$branch" >/dev/null && log "deleted local branch $branch (merged)"
   elif [ -n "$branch" ]; then log "kept local branch $branch (not in $LANES_BASE)"; fi
   log "removed $dir"
-  # After a merge the main checkout is next. (sync, through prune, pulls it itself.)
+  # After a merge the main checkout is next. (prune warns once, at its end.)
   [ "${LANES_DROP_BRANCH:-0}" = 1 ] || main_warnings
 }
 
@@ -666,9 +702,10 @@ all_upstream() {  # all_upstream <rev>
 }
 
 prune_verdict() {  # prune_verdict <dir> <branch>
-  local dir="$1" b="$2" head h
+  local dir="$1" b="$2" head h changes
   [ -n "$b" ] || { echo "keep detached HEAD"; return; }
-  [ -z "$(dirty_status "$dir" 2>/dev/null)" ] || { echo "keep uncommitted changes"; return; }
+  changes="$(dirty_status "$dir" 2>/dev/null)" || { echo "keep git status fails"; return; }
+  [ -z "$changes" ] || { echo "keep uncommitted changes"; return; }
   head="$(git -C "$dir" rev-parse HEAD)"
   if [ "$head" = "$(branch_start "$b" "$head")" ]; then echo "keep no commits of its own yet"; return; fi
   if git -C "$MAIN" merge-base --is-ancestor "$head" "$LANES_BASE" 2>/dev/null; then
@@ -720,6 +757,7 @@ cmd_prune() {
   if [ "$n" = 0 ]; then log "nothing to prune"
   elif [ "$yes" = 0 ]; then log "$n to prune — run: lanes prune --yes"
   else log "pruned $n"; fi
+  main_warnings
 }
 
 # After merges, in the main checkout: update the default branch, remove merged

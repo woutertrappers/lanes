@@ -48,7 +48,8 @@ and the user's own terminal need `lanes` on the real PATH: if it is not there, o
     activity means another session may be working there: ask the user, or make your own lane.
     An old value is no proof that it is free (reading and running tests leave no trace).
 11. **Pass on the main checkout warnings** that `lanes ls`, `status` and `rm` print (behind,
-    diverged, uncommitted files). Don't pull, commit or stash there without asking.
+    diverged, uncommitted changes). Don't pull, commit, stash or run `lanes sync` there
+    without asking.
 
 ## Set up a repo
 
@@ -92,7 +93,7 @@ and the user's own terminal need `lanes` on the real PATH: if it is not there, o
 | `lanes status` | the session-start overview |
 | `lanes index` | refresh the GitNexus index of this checkout |
 | `lanes up` / `down` / `url` | stack control inside a lane |
-| `lanes rm <name>` | stack, volumes, images, index and worktree gone; refuses unpushed work |
+| `lanes rm <name>` | fetches, then stack, volumes, images, index and worktree gone; refuses uncommitted or unpushed work |
 | `lanes sync` (`git post-merge`) | main checkout after merges: pull, prune lanes and merged branches, reindex; refuses on an unmerged or dirty branch |
 | `lanes prune [--yes]` | every merged lane gone (merge, fast-forward or squash via the forge); keeps dirty, fresh and changed-after-merge lanes; also stops orphaned stacks |
 | `lanes doctor` | readiness check for the current repo |
