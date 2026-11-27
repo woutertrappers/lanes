@@ -21,9 +21,10 @@ cd ../<repo>-lanes/feat-short-name
 claude                         # or your agent of choice
 ```
 
-The `SessionStart` hook prints `lanes status`: where this session is, every lane, open
-draft PRs, files you share with other open branches, and a stale code index. Act on its
-warnings before you write code.
+The `SessionStart` hook prints `lanes status`: where this session is, every lane and when
+it was last active, open draft PRs, files you share with other open branches, a stale code
+index and the state of the main checkout. Act on warnings about your own lane before you
+write code; leave warnings about the main checkout to the integrator.
 
 ## While you work
 
@@ -44,8 +45,8 @@ warnings before you write code.
 1. Mark the draft ready; wait for a green pipeline.
 2. The integrator merges, then runs `lanes sync` (or the alias `git post-merge`) in the main
    checkout: pull `main`, remove merged lanes and branches, refresh the index.
-3. `lanes rm <name>` removes the stack, volumes, images, index and folder. It refuses while
-   work is uncommitted or unpushed. After a round of merges, `lanes prune` lists every lane
+3. `lanes rm <name>` fetches, then removes the stack, volumes, images, index and folder. It
+   refuses while work is uncommitted or unpushed. After a round of merges, `lanes prune` lists every lane
    whose work is merged (squash merges too) and `lanes prune --yes` removes them.
 
 ## Shared things outside git

@@ -44,6 +44,12 @@ and the user's own terminal need `lanes` on the real PATH: if it is not there, o
    or run `lanes prune` (a dry run) after merges and show its list. Never pass `--force` or
    `--yes` without asking.
 9. **Never deploy or touch servers from a lane.** That is the integrator's job.
+10. **Before changing a lane that isn't yours, check `ACTIVE` in `lanes ls`.** Recent
+    activity means another session may be working there: ask the user, or make your own lane.
+    An old value is no proof that it is free (reading and running tests leave no trace).
+11. **Pass on the main checkout warnings** that `lanes ls`, `status` and `rm` print (behind,
+    diverged, uncommitted changes). Don't pull, commit, stash or run `lanes sync` there
+    without asking.
 
 ## Set up a repo
 
@@ -81,13 +87,13 @@ and the user's own terminal need `lanes` on the real PATH: if it is not there, o
 | Command | Does |
 |---|---|
 | `lanes new <type>/<slug>` | worktree from `origin/main`, own compose project + ports, DB cloned or bootstrapped, code index |
-| `lanes ls` | every lane: branch, port, stack, ahead/behind, dirty files |
+| `lanes ls` | every lane: branch, port, stack, ahead/behind, dirty files, last activity; warns about the main checkout |
 | `lanes overlap` | files this branch shares with other open branches |
 | `lanes claim` | push + draft PR (GitHub via `gh`) or MR (GitLab push options) |
 | `lanes status` | the session-start overview |
 | `lanes index` | refresh the GitNexus index of this checkout |
 | `lanes up` / `down` / `url` | stack control inside a lane |
-| `lanes rm <name>` | stack, volumes, images, index and worktree gone; refuses unpushed work |
+| `lanes rm <name>` | fetches, then stack, volumes, images, index and worktree gone; refuses uncommitted or unpushed work |
 | `lanes sync` (`git post-merge`) | main checkout after merges: pull, prune lanes and merged branches, reindex; refuses on an unmerged or dirty branch |
 | `lanes prune [--yes]` | every merged lane gone (merge, fast-forward or squash via the forge); keeps dirty, fresh and changed-after-merge lanes; also stops orphaned stacks |
 | `lanes doctor` | readiness check for the current repo |
